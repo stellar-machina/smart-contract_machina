@@ -1,0 +1,12 @@
+[workspace]
+resolver = "2"
+members = ["contracts/escrow"]
+
+[profile.release]
+opt-level = "z"
+overflow-checks = true
+debug = false
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
