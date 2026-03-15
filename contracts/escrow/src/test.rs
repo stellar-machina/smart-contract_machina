@@ -2,10 +2,7 @@
 #![allow(deprecated)]
 
 use super::*;
-use soroban_sdk::{
-    testutils::Address as _,
-    Address, Symbol,
-};
+use soroban_sdk::{testutils::Address as _, Address, Symbol};
 
 #[test]
 fn test_version() {
