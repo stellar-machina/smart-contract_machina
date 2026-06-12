@@ -73,6 +73,11 @@ pub enum DataKey {
     SchemaVersion,
     /// Free-form metadata (`description`, `owner`) about a service.
     ServiceMetadata(Symbol),
+    /// `true` when a service has been temporarily disabled by admin.
+    /// Distinct from `ServiceRegistered`: a registered service can be
+    /// disabled without unregistering, preserving the metadata and the
+    /// per-(agent, service) usage history.
+    ServiceDisabled(Symbol),
 }
 
 /// Typed contract errors. Codes are append-only to keep client SDKs stable.
@@ -107,6 +112,8 @@ pub enum EscrowError {
     /// `migrate_v1_to_v2` was called from a non-v1 schema. v2 itself is
     /// already migrated.
     MigrationVersionMismatch = 11,
+    /// `record_usage` referenced a service that has been disabled.
+    ServiceDisabled = 12,
 }
 
 #[contracttype]
