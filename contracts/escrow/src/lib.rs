@@ -1,6 +1,33 @@
 #![no_std]
 
-use soroban_sdk::{contract, contractimpl, contracttype, Address, Env, Symbol};
+use soroban_sdk::{
+    contract, contracterror, contractimpl, contracttype, Address, Env, Symbol,
+};
+
+/// Storage keys used by the escrow contract.
+///
+/// Persistent slots survive across full TTL cycles and are appropriate for
+/// long-lived configuration (e.g. the admin address) and for per-(agent,
+/// service) usage accumulators that AgentPay's settlement loop reads.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum DataKey {
+    /// Operational admin address; set once at `init`.
+    Admin,
+    /// Accumulated usage counter for a given `(agent, service_id)` pair.
+    Usage(Address, Symbol),
+}
+
+/// Typed contract errors. Codes are append-only to keep client SDKs stable.
+#[contracterror]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u32)]
+pub enum EscrowError {
+    /// `init` was already called and the admin address is already stored.
+    AlreadyInitialized = 1,
+    /// `record_usage` was called with `requests == 0`.
+    RequestsMustBePositive = 2,
+}
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
