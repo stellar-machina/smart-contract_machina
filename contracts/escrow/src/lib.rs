@@ -21,6 +21,10 @@ pub enum DataKey {
     /// `true` when the contract is paused (no state-changing entrypoints
     /// accept calls).
     Paused,
+    /// Pending admin address proposed via `propose_admin_transfer`,
+    /// waiting on `accept_admin_transfer`. Two-step handover prevents
+    /// accidentally locking out of the contract via a bad signing key.
+    PendingAdmin,
 }
 
 /// Typed contract errors. Codes are append-only to keep client SDKs stable.
@@ -36,6 +40,10 @@ pub enum EscrowError {
     NotInitialized = 3,
     /// A state-changing entrypoint was called while `Paused` is `true`.
     ContractPaused = 4,
+    /// `accept_admin_transfer` was called but no pending admin is set.
+    NoPendingAdminTransfer = 5,
+    /// `accept_admin_transfer` was called by the wrong address.
+    NotPendingAdmin = 6,
 }
 
 #[contracttype]
