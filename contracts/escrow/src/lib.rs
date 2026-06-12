@@ -25,6 +25,12 @@ pub enum DataKey {
     /// waiting on `accept_admin_transfer`. Two-step handover prevents
     /// accidentally locking out of the contract via a bad signing key.
     PendingAdmin,
+    /// `true` if a service is registered (i.e. admin has explicitly
+    /// listed it). When `RequireServiceRegistration` is enabled,
+    /// `record_usage` rejects unknown services with a typed error.
+    ServiceRegistered(Symbol),
+    /// `true` when `record_usage` should reject unknown services.
+    RequireServiceRegistration,
 }
 
 /// Typed contract errors. Codes are append-only to keep client SDKs stable.
@@ -44,6 +50,9 @@ pub enum EscrowError {
     NoPendingAdminTransfer = 5,
     /// `accept_admin_transfer` was called by the wrong address.
     NotPendingAdmin = 6,
+    /// `record_usage` referenced a service that has not been registered
+    /// while strict registration is enabled.
+    ServiceNotRegistered = 7,
 }
 
 #[contracttype]
