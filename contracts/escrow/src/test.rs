@@ -97,6 +97,13 @@ fn test_get_usage_returns_zero_for_unknown_pair() {
 }
 
 #[test]
+fn test_set_service_price_admin_can_write() {
+    let env = Env::default();
+    let (client, _admin) = setup_initialized(&env);
+    client.set_service_price(&Symbol::new(&env, "infer"), &500i128);
+}
+
+#[test]
 #[should_panic(expected = "Error(Contract, #2)")]
 fn test_record_usage_rejects_zero_requests() {
     let env = Env::default();

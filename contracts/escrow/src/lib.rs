@@ -111,6 +111,28 @@ impl Escrow {
             .unwrap_or(0)
     }
 
+    /// Set the per-request price (in stroops) for a service.
+    ///
+    /// Admin-gated. Persists in `DataKey::ServicePrice(service_id)`.
+    /// A negative price is rejected at call time so downstream billing
+    /// math can assume a non-negative multiplicand; a zero price is
+    /// allowed and means "free service" (still records usage, settles to
+    /// zero).
+    pub fn set_service_price(env: Env, service_id: Symbol, price_stroops: i128) {
+        let admin: Address = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Admin)
+            .unwrap_or_else(|| panic_with_error!(&env, EscrowError::NotInitialized));
+        admin.require_auth();
+        if price_stroops < 0 {
+            panic_with_error!(&env, EscrowError::RequestsMustBePositive);
+        }
+        env.storage()
+            .persistent()
+            .set(&DataKey::ServicePrice(service_id), &price_stroops);
+    }
+
     /// Get the version of the contract for compatibility checks.
     pub fn version(env: Env) -> u32 {
         let _ = env;
