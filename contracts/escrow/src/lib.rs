@@ -38,6 +38,11 @@ pub enum DataKey {
     /// Lower bound on `requests` per single `record_usage` call.
     /// Useful for amortising the per-write ledger cost.
     MinRequestsPerCall,
+    /// Per-agent allowlist flag. When `AllowlistEnabled` is true,
+    /// `record_usage` rejects agents whose entry is absent or false.
+    AgentAllowed(Address),
+    /// Master toggle: when true, the per-agent allowlist is enforced.
+    AllowlistEnabled,
 }
 
 /// Typed contract errors. Codes are append-only to keep client SDKs stable.
@@ -66,6 +71,9 @@ pub enum EscrowError {
     /// `record_usage` was called with a `requests` value below the
     /// configured `MinRequestsPerCall` floor.
     RequestsBelowMinPerCall = 9,
+    /// `record_usage` was called by/for an agent not on the allowlist
+    /// while strict allowlisting is enabled.
+    AgentNotAllowed = 10,
 }
 
 #[contracttype]
@@ -275,6 +283,19 @@ impl Escrow {
             .persistent()
             .get(&DataKey::MinRequestsPerCall)
             .unwrap_or(0)
+    }
+
+    /// Admin sets the allowlist status for a specific agent.
+    pub fn set_agent_allowed(env: Env, agent: Address, allowed: bool) {
+        let admin: Address = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Admin)
+            .unwrap_or_else(|| panic_with_error!(&env, EscrowError::NotInitialized));
+        admin.require_auth();
+        env.storage()
+            .persistent()
+            .set(&DataKey::AgentAllowed(agent), &allowed);
     }
 
     /// Admin sets the per-call lower bound on `requests` for batched
