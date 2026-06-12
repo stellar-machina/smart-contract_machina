@@ -187,6 +187,25 @@ fn test_propose_admin_transfer_persists_pending() {
 }
 
 #[test]
+fn test_accept_admin_transfer_rotates_admin() {
+    let env = Env::default();
+    let (client, _admin) = setup_initialized(&env);
+    let next = Address::generate(&env);
+    client.propose_admin_transfer(&next);
+    client.accept_admin_transfer(&next);
+    assert_eq!(client.get_admin(), Some(next));
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #5)")]
+fn test_accept_admin_transfer_panics_with_no_pending() {
+    let env = Env::default();
+    let (client, _admin) = setup_initialized(&env);
+    let caller = Address::generate(&env);
+    client.accept_admin_transfer(&caller);
+}
+
+#[test]
 fn test_is_paused_round_trip() {
     let env = Env::default();
     let (client, _admin) = setup_initialized(&env);
