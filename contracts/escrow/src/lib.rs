@@ -54,6 +54,11 @@ pub enum DataKey {
     /// `settle` call drained this `(agent, service_id)` pair. Lets
     /// off-chain SLA monitoring catch stuck settlement cycles.
     LastSettlement(Address, Symbol),
+    /// On-chain storage schema version. Distinct from the contract
+    /// version() (which is the compiled wasm version): SchemaVersion
+    /// tracks what the persisted state layout looks like so callers can
+    /// confirm a `migrate` has run on a redeployed contract.
+    SchemaVersion,
 }
 
 /// Typed contract errors. Codes are append-only to keep client SDKs stable.
@@ -586,6 +591,15 @@ impl Escrow {
             .unwrap_or_else(|| panic_with_error!(&env, EscrowError::NotInitialized));
         admin.require_auth();
         env.storage().persistent().set(&DataKey::Paused, &true);
+    }
+
+    /// Read the on-chain schema version, or `1` (the implicit
+    /// pre-migration default) if absent.
+    pub fn get_schema_version(env: Env) -> u32 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::SchemaVersion)
+            .unwrap_or(1)
     }
 
     /// Get the version of the contract for compatibility checks.
