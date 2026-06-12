@@ -49,5 +49,59 @@ fn test_record_usage() {
     let record = client.record_usage(&agent, &service_id, &requests);
     assert_eq!(record.agent, agent);
     assert_eq!(record.service_id, service_id);
+    // First write: total equals the recorded delta.
     assert_eq!(record.requests, requests);
+}
+
+#[test]
+fn test_record_usage_accumulates_across_calls() {
+    let env = Env::default();
+    let (client, _admin) = setup_initialized(&env);
+
+    let agent = Address::generate(&env);
+    let service_id = Symbol::new(&env, "weather_api");
+
+    let first = client.record_usage(&agent, &service_id, &40u32);
+    assert_eq!(first.requests, 40);
+    let second = client.record_usage(&agent, &service_id, &60u32);
+    assert_eq!(second.requests, 100);
+    let third = client.record_usage(&agent, &service_id, &1u32);
+    assert_eq!(third.requests, 101);
+
+    assert_eq!(client.get_usage(&agent, &service_id), 101);
+}
+
+#[test]
+fn test_record_usage_is_keyed_per_service() {
+    let env = Env::default();
+    let (client, _admin) = setup_initialized(&env);
+
+    let agent = Address::generate(&env);
+    let weather = Symbol::new(&env, "weather_api");
+    let inference = Symbol::new(&env, "infer_api");
+
+    client.record_usage(&agent, &weather, &10u32);
+    client.record_usage(&agent, &inference, &7u32);
+
+    assert_eq!(client.get_usage(&agent, &weather), 10);
+    assert_eq!(client.get_usage(&agent, &inference), 7);
+}
+
+#[test]
+fn test_get_usage_returns_zero_for_unknown_pair() {
+    let env = Env::default();
+    let (client, _admin) = setup_initialized(&env);
+    let unseen_agent = Address::generate(&env);
+    let svc = Symbol::new(&env, "anything");
+    assert_eq!(client.get_usage(&unseen_agent, &svc), 0);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #2)")]
+fn test_record_usage_rejects_zero_requests() {
+    let env = Env::default();
+    let (client, _admin) = setup_initialized(&env);
+    let agent = Address::generate(&env);
+    let service_id = Symbol::new(&env, "weather_api");
+    client.record_usage(&agent, &service_id, &0u32);
 }

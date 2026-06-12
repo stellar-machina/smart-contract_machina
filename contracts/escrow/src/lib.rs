@@ -67,18 +67,44 @@ impl Escrow {
     }
 
     /// Record that an agent has consumed usage for a service.
-    /// In a full implementation this would update balances and trigger settlement.
+    ///
+    /// Accumulates `requests` into the persistent counter keyed by
+    /// `(agent, service_id)`. Rejects zero-request calls with
+    /// [`EscrowError::RequestsMustBePositive`] so off-chain settlement
+    /// loops never see a no-op event in the audit trail. Saturates at
+    /// `u32::MAX` rather than overflowing — the settlement loop is
+    /// expected to drain the counter long before that becomes plausible.
+    ///
+    /// Returns a `UsageRecord` carrying the *new total*, not the delta,
+    /// so the caller can confirm the post-write state without a second
+    /// storage read.
     pub fn record_usage(
-        _env: Env,
+        env: Env,
         agent: Address,
         service_id: Symbol,
         requests: u32,
     ) -> UsageRecord {
-        UsageRecord {
-            agent: agent.clone(),
-            service_id,
-            requests,
+        if requests == 0 {
+            panic_with_error!(&env, EscrowError::RequestsMustBePositive);
         }
+        let key = DataKey::Usage(agent.clone(), service_id.clone());
+        let prev: u32 = env.storage().persistent().get(&key).unwrap_or(0);
+        let total = prev.saturating_add(requests);
+        env.storage().persistent().set(&key, &total);
+        UsageRecord {
+            agent,
+            service_id,
+            requests: total,
+        }
+    }
+
+    /// Returns the accumulated request count for an `(agent, service_id)`
+    /// pair, or `0` if no usage has been recorded yet.
+    pub fn get_usage(env: Env, agent: Address, service_id: Symbol) -> u32 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::Usage(agent, service_id))
+            .unwrap_or(0)
     }
 
     /// Get the version of the contract for compatibility checks.
