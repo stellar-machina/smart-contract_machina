@@ -144,6 +144,13 @@ fn test_settle_drains_usage_and_returns_billed() {
 }
 
 #[test]
+fn test_pause_admin_can_pause() {
+    let env = Env::default();
+    let (client, _admin) = setup_initialized(&env);
+    client.pause();
+}
+
+#[test]
 fn test_settle_returns_zero_for_unused_pair() {
     let env = Env::default();
     let (client, _admin) = setup_initialized(&env);

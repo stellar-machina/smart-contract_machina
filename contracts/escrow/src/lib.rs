@@ -194,6 +194,19 @@ impl Escrow {
         billed
     }
 
+    /// Pause the contract — every state-changing entrypoint will then
+    /// panic with [`EscrowError::ContractPaused`]. Admin-gated and
+    /// idempotent (pausing an already-paused contract is a no-op write).
+    pub fn pause(env: Env) {
+        let admin: Address = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Admin)
+            .unwrap_or_else(|| panic_with_error!(&env, EscrowError::NotInitialized));
+        admin.require_auth();
+        env.storage().persistent().set(&DataKey::Paused, &true);
+    }
+
     /// Get the version of the contract for compatibility checks.
     pub fn version(env: Env) -> u32 {
         let _ = env;
