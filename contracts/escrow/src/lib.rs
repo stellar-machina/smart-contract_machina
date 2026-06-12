@@ -648,6 +648,21 @@ impl Escrow {
             .get(&DataKey::ServiceMetadata(service_id))
     }
 
+    /// Admin sets the disabled flag for a service. Disabling a service
+    /// causes `record_usage` to panic with `ServiceDisabled` for that
+    /// id; registration and metadata are preserved.
+    pub fn set_service_disabled(env: Env, service_id: Symbol, disabled: bool) {
+        let admin: Address = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Admin)
+            .unwrap_or_else(|| panic_with_error!(&env, EscrowError::NotInitialized));
+        admin.require_auth();
+        env.storage()
+            .persistent()
+            .set(&DataKey::ServiceDisabled(service_id), &disabled);
+    }
+
     /// Admin sets human-readable metadata for a service. Persisted
     /// under `DataKey::ServiceMetadata(service_id)`. Description is
     /// capped at 256 UTF-8 bytes to bound storage cost.
