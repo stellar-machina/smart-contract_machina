@@ -142,6 +142,14 @@ impl Escrow {
         if requests > max_per_call {
             panic_with_error!(&env, EscrowError::RequestsExceedsMaxPerCall);
         }
+        let min_per_call: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::MinRequestsPerCall)
+            .unwrap_or(0);
+        if requests < min_per_call {
+            panic_with_error!(&env, EscrowError::RequestsBelowMinPerCall);
+        }
         if env
             .storage()
             .persistent()
