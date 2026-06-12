@@ -1,7 +1,7 @@
 #![no_std]
 
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, Address, Env, Symbol,
+    contract, contracterror, contractimpl, contracttype, panic_with_error, Address, Env, Symbol,
 };
 
 /// Storage keys used by the escrow contract.
@@ -42,10 +42,28 @@ pub struct Escrow;
 
 #[contractimpl]
 impl Escrow {
-    /// Initialize the escrow contract.
-    pub fn init(env: Env) {
-        // Placeholder for one-time init (e.g. admin) if needed.
-        let _ = env;
+    /// Initialize the escrow contract with the operational admin.
+    ///
+    /// Requires `admin.require_auth()` and panics with
+    /// [`EscrowError::AlreadyInitialized`] if an admin has already been stored.
+    /// Idempotency is enforced strictly: a second call with the same admin
+    /// address still fails. Use a redeploy or a future admin-rotation
+    /// entrypoint if the admin needs to change.
+    pub fn init(env: Env, admin: Address) {
+        if env
+            .storage()
+            .persistent()
+            .has(&DataKey::Admin)
+        {
+            panic_with_error!(&env, EscrowError::AlreadyInitialized);
+        }
+        admin.require_auth();
+        env.storage().persistent().set(&DataKey::Admin, &admin);
+    }
+
+    /// Returns the admin address stored at `init`, if any.
+    pub fn get_admin(env: Env) -> Option<Address> {
+        env.storage().persistent().get(&DataKey::Admin)
     }
 
     /// Record that an agent has consumed usage for a service.
