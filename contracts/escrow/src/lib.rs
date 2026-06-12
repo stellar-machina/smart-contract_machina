@@ -16,6 +16,8 @@ pub enum DataKey {
     Admin,
     /// Accumulated usage counter for a given `(agent, service_id)` pair.
     Usage(Address, Symbol),
+    /// Price per request, in stroops, for a registered service.
+    ServicePrice(Symbol),
 }
 
 /// Typed contract errors. Codes are append-only to keep client SDKs stable.
@@ -27,6 +29,8 @@ pub enum EscrowError {
     AlreadyInitialized = 1,
     /// `record_usage` was called with `requests == 0`.
     RequestsMustBePositive = 2,
+    /// An admin-gated entrypoint was invoked but the admin is not set.
+    NotInitialized = 3,
 }
 
 #[contracttype]
