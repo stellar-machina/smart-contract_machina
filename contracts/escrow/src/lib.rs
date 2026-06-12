@@ -50,6 +50,10 @@ pub enum DataKey {
     /// Protocol-wide lifetime request counter, written by every
     /// successful `record_usage`. Useful as a single grafana gauge.
     TotalRequestsAllTime,
+    /// Ledger timestamp (seconds since unix epoch) at which the last
+    /// `settle` call drained this `(agent, service_id)` pair. Lets
+    /// off-chain SLA monitoring catch stuck settlement cycles.
+    LastSettlement(Address, Symbol),
 }
 
 /// Typed contract errors. Codes are append-only to keep client SDKs stable.
@@ -330,6 +334,10 @@ impl Escrow {
             .unwrap_or(0);
         let billed = (requests as i128).saturating_mul(price);
         env.storage().persistent().set(&usage_key, &0u32);
+        env.storage().persistent().set(
+            &DataKey::LastSettlement(agent, service_id),
+            &env.ledger().timestamp(),
+        );
         billed
     }
 
