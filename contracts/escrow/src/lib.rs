@@ -255,6 +255,11 @@ impl Escrow {
             &proto_prev.saturating_add(requests as u64),
         );
 
+        env.events().publish(
+            (symbol_short!("usage"),),
+            (agent.clone(), service_id.clone(), requests, total),
+        );
+
         UsageRecord {
             agent,
             service_id,
