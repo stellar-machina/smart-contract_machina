@@ -247,6 +247,15 @@ impl Escrow {
         billed
     }
 
+    /// Read the configured per-call cap, or `u32::MAX` (no limit) if
+    /// none has been set.
+    pub fn get_max_requests_per_call(env: Env) -> u32 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::MaxRequestsPerCall)
+            .unwrap_or(u32::MAX)
+    }
+
     /// Admin sets the per-call upper bound on `requests` accepted by
     /// `record_usage`. Pass `u32::MAX` to effectively disable the cap.
     pub fn set_max_requests_per_call(env: Env, max_requests: u32) {
