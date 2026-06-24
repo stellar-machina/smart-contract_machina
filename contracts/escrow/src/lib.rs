@@ -2,11 +2,19 @@
 
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, panic_with_error, symbol_short, Address,
-    Env, String, Symbol,
+    Env, String, Symbol, Vec,
 };
 
 /// Current on-chain storage schema version stamped at init.
 const CURRENT_SCHEMA: u32 = 2;
+
+/// Maximum number of `(agent, service_id)` pairs accepted by a single
+/// `get_usage_batch` call. Chosen at 100 as a conservative cap: the batch
+/// read iterates the input once doing one persistent read per pair, so the
+/// bound keeps the loop (and the host's storage-read budget) predictable and
+/// prevents a single call from triggering an unboundedly large amount of work.
+/// Callers needing more pairs should page the requests.
+pub const MAX_BATCH_READ: u32 = 100;
 
 /// Free-form metadata about a service. Stored under
 /// `DataKey::ServiceMetadata(service_id)` so dashboards and clients can
@@ -124,6 +132,8 @@ pub enum EscrowError {
     /// proposed new admin — a no-op handover that is rejected to surface
     /// caller mistakes early.
     InvalidAdminProposal = 14,
+    /// `get_usage_batch` was called with more than `MAX_BATCH_READ` pairs.
+    BatchTooLarge = 15,
 }
 
 #[contracttype]
@@ -166,6 +176,17 @@ fn write_service_metadata(env: &Env, service_id: &Symbol, description: String, o
         &DataKey::ServiceMetadata(service_id.clone()),
         &ServiceMetadata { description, owner },
     );
+}
+
+/// Read the accumulated usage counter for an `(agent, service_id)` pair,
+/// defaulting to `0` when no usage has been recorded. Centralising this
+/// read keeps the single-pair `get_usage` and the batched
+/// `get_usage_batch` from drifting in their default/key semantics.
+fn read_usage(env: &Env, agent: &Address, service_id: &Symbol) -> u32 {
+    env.storage()
+        .persistent()
+        .get(&DataKey::Usage(agent.clone(), service_id.clone()))
+        .unwrap_or(0)
 }
 
 #[contract]
@@ -347,10 +368,31 @@ impl Escrow {
     /// Returns the accumulated request count for an `(agent, service_id)`
     /// pair, or `0` if no usage has been recorded yet.
     pub fn get_usage(env: Env, agent: Address, service_id: Symbol) -> u32 {
-        env.storage()
-            .persistent()
-            .get(&DataKey::Usage(agent, service_id))
-            .unwrap_or(0)
+        read_usage(&env, &agent, &service_id)
+    }
+
+    /// Batched usage read: returns the accumulated request count for each
+    /// input `(agent, service_id)` pair, in the same order as `pairs`.
+    ///
+    /// Pure read — no `require_auth`, no pause gate — so off-chain
+    /// dashboards and settlement loops can fetch many counters in one call.
+    /// Each entry is resolved with the same `read_usage` helper as
+    /// [`Escrow::get_usage`], so unknown pairs return `0` and duplicate
+    /// pairs simply yield the same value at each position.
+    ///
+    /// Panics with [`EscrowError::BatchTooLarge`] when
+    /// `pairs.len() > MAX_BATCH_READ`. Rejecting oversized requests keeps
+    /// the read loop bounded and the host's storage-read budget
+    /// predictable; callers should page larger queries.
+    pub fn get_usage_batch(env: Env, pairs: Vec<(Address, Symbol)>) -> Vec<u32> {
+        if pairs.len() > MAX_BATCH_READ {
+            panic_with_error!(&env, EscrowError::BatchTooLarge);
+        }
+        let mut results: Vec<u32> = Vec::new(&env);
+        for (agent, service_id) in pairs.iter() {
+            results.push_back(read_usage(&env, &agent, &service_id));
+        }
+        results
     }
 
     /// Set the per-request price (in stroops) for a service.

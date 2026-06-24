@@ -63,6 +63,17 @@ deployed contract reports `get_schema_version() == 2` without ever running a
 migration. A legacy contract deployed before this change carries the implicit v1
 default and must call `migrate_v1_to_v2()` to reach v2; calling that migration on
 a fresh v2 deploy panics with `MigrationVersionMismatch`.
+### Batched usage reads
+
+`get_usage_batch(pairs)` reads the accumulated usage counter for many
+`(agent, service_id)` pairs in a single call, returning a `Vec<u32>` in the same
+order as the input. It is a pure read: no `require_auth` and no pause gate, so
+off-chain dashboards and settlement loops can fan out efficiently. Unknown pairs
+return `0` and duplicate pairs yield the same value at each position, matching
+`get_usage`. To keep the read loop bounded and the host's storage-read budget
+predictable, the batch is capped at `MAX_BATCH_READ` (100) pairs; a request above
+the bound panics with `BatchTooLarge`. Callers needing more pairs should page the
+requests.
 
 ## Prerequisites
 
