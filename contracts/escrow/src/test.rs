@@ -697,3 +697,90 @@ fn test_pause_pause_unpause_ends_unpaused() {
 
     assert!(!client.is_paused());
 }
+
+// --- Pause gate coverage for config-mutation entrypoints (issue #23) ---
+// Every admin config mutation must respect the emergency-stop flag. These
+// assert each representative entrypoint panics with ContractPaused (#4)
+// once the contract is paused.
+
+#[test]
+#[should_panic(expected = "Error(Contract, #4)")]
+fn test_set_service_price_rejected_while_paused() {
+    let env = Env::default();
+    let (client, _admin) = setup_initialized(&env);
+    client.pause();
+    client.set_service_price(&Symbol::new(&env, "infer"), &500i128);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #4)")]
+fn test_register_service_rejected_while_paused() {
+    let env = Env::default();
+    let (client, _admin) = setup_initialized(&env);
+    client.pause();
+    client.register_service(&Symbol::new(&env, "infer"));
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #4)")]
+fn test_set_agent_allowed_rejected_while_paused() {
+    let env = Env::default();
+    let (client, _admin) = setup_initialized(&env);
+    client.pause();
+    let agent = Address::generate(&env);
+    client.set_agent_allowed(&agent, &true);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #4)")]
+fn test_set_service_metadata_rejected_while_paused() {
+    let env = Env::default();
+    let (client, _admin) = setup_initialized(&env);
+    client.pause();
+    let owner = Address::generate(&env);
+    client.set_service_metadata(
+        &Symbol::new(&env, "infer"),
+        &String::from_str(&env, "desc"),
+        &owner,
+    );
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #4)")]
+fn test_clear_service_metadata_rejected_while_paused() {
+    let env = Env::default();
+    let (client, _admin) = setup_initialized(&env);
+    client.pause();
+    client.clear_service_metadata(&Symbol::new(&env, "infer"));
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #4)")]
+fn test_set_max_requests_per_call_rejected_while_paused() {
+    let env = Env::default();
+    let (client, _admin) = setup_initialized(&env);
+    client.pause();
+    client.set_max_requests_per_call(&10u32);
+}
+
+#[test]
+fn test_unpause_works_while_paused() {
+    let env = Env::default();
+    let (client, _admin) = setup_initialized(&env);
+    client.pause();
+    assert!(client.is_paused());
+    // Lifecycle control must remain callable during an incident.
+    client.unpause();
+    assert!(!client.is_paused());
+}
+
+#[test]
+fn test_getter_works_while_paused() {
+    let env = Env::default();
+    let (client, _admin) = setup_initialized(&env);
+    let svc = Symbol::new(&env, "infer");
+    client.set_service_price(&svc, &500i128);
+    client.pause();
+    // Read getters must remain callable while paused.
+    assert_eq!(client.get_service_price(&svc), 500i128);
+}

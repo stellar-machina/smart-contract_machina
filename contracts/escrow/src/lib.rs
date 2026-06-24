@@ -149,6 +149,14 @@ fn write_flag(env: &Env, key: &DataKey, value: bool) {
     env.storage().persistent().set(key, &value);
 }
 
+/// Panics with ContractPaused if the contract is paused. Centralises the
+/// emergency-stop check so new mutating entrypoints cannot forget it.
+fn ensure_not_paused(env: &Env) {
+    if read_flag(env, &DataKey::Paused) {
+        panic_with_error!(env, EscrowError::ContractPaused);
+    }
+}
+
 #[contract]
 pub struct Escrow;
 
@@ -315,6 +323,7 @@ impl Escrow {
             .get(&DataKey::Admin)
             .unwrap_or_else(|| panic_with_error!(&env, EscrowError::NotInitialized));
         admin.require_auth();
+        ensure_not_paused(&env);
         if price_stroops < 0 {
             panic_with_error!(&env, EscrowError::RequestsMustBePositive);
         }
@@ -407,6 +416,7 @@ impl Escrow {
             .get(&DataKey::Admin)
             .unwrap_or_else(|| panic_with_error!(&env, EscrowError::NotInitialized));
         admin.require_auth();
+        ensure_not_paused(&env);
         write_flag(&env, &DataKey::AllowlistEnabled, enabled);
     }
 
@@ -428,6 +438,7 @@ impl Escrow {
             .get(&DataKey::Admin)
             .unwrap_or_else(|| panic_with_error!(&env, EscrowError::NotInitialized));
         admin.require_auth();
+        ensure_not_paused(&env);
         write_flag(&env, &DataKey::AgentAllowed(agent), allowed);
     }
 
@@ -440,6 +451,7 @@ impl Escrow {
             .get(&DataKey::Admin)
             .unwrap_or_else(|| panic_with_error!(&env, EscrowError::NotInitialized));
         admin.require_auth();
+        ensure_not_paused(&env);
         env.storage()
             .persistent()
             .set(&DataKey::MinRequestsPerCall, &min_requests);
@@ -463,6 +475,7 @@ impl Escrow {
             .get(&DataKey::Admin)
             .unwrap_or_else(|| panic_with_error!(&env, EscrowError::NotInitialized));
         admin.require_auth();
+        ensure_not_paused(&env);
         env.storage()
             .persistent()
             .set(&DataKey::MaxRequestsPerCall, &max_requests);
@@ -478,6 +491,7 @@ impl Escrow {
             .get(&DataKey::Admin)
             .unwrap_or_else(|| panic_with_error!(&env, EscrowError::NotInitialized));
         admin.require_auth();
+        ensure_not_paused(&env);
         write_flag(&env, &DataKey::RequireServiceRegistration, required);
     }
 
@@ -502,6 +516,7 @@ impl Escrow {
             .get(&DataKey::Admin)
             .unwrap_or_else(|| panic_with_error!(&env, EscrowError::NotInitialized));
         admin.require_auth();
+        ensure_not_paused(&env);
         env.storage()
             .persistent()
             .remove(&DataKey::ServiceRegistered(service_id));
@@ -516,6 +531,7 @@ impl Escrow {
             .get(&DataKey::Admin)
             .unwrap_or_else(|| panic_with_error!(&env, EscrowError::NotInitialized));
         admin.require_auth();
+        ensure_not_paused(&env);
         write_flag(&env, &DataKey::ServiceRegistered(service_id), true);
     }
 
@@ -653,6 +669,7 @@ impl Escrow {
             .get(&DataKey::Admin)
             .unwrap_or_else(|| panic_with_error!(&env, EscrowError::NotInitialized));
         admin.require_auth();
+        ensure_not_paused(&env);
         write_flag(&env, &DataKey::ServiceDisabled(service_id), disabled);
     }
 
@@ -666,6 +683,7 @@ impl Escrow {
             .get(&DataKey::Admin)
             .unwrap_or_else(|| panic_with_error!(&env, EscrowError::NotInitialized));
         admin.require_auth();
+        ensure_not_paused(&env);
         env.storage().persistent().set(
             &DataKey::ServiceMetadata(service_id),
             &ServiceMetadata { description, owner },
@@ -730,6 +748,7 @@ impl Escrow {
             .get(&DataKey::Admin)
             .unwrap_or_else(|| panic_with_error!(&env, EscrowError::NotInitialized));
         admin.require_auth();
+        ensure_not_paused(&env);
         env.storage()
             .persistent()
             .remove(&DataKey::ServiceMetadata(service_id.clone()));
