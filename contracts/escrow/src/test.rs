@@ -139,12 +139,12 @@ fn test_compute_billing_basic() {
 #[test]
 fn test_settle_drains_usage_and_returns_billed() {
     let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
+    let (client, admin) = setup_initialized(&env);
     let agent = Address::generate(&env);
     let svc = Symbol::new(&env, "infer");
     client.set_service_price(&svc, &10i128);
     client.record_usage(&agent, &svc, &42u32);
-    let billed = client.settle(&agent, &svc);
+    let billed = client.settle(&admin, &agent, &svc);
     assert_eq!(billed, 420i128);
     assert_eq!(client.get_usage(&agent, &svc), 0);
 }
@@ -168,10 +168,10 @@ fn test_unpause_admin_can_unpause() {
 #[should_panic(expected = "Error(Contract, #4)")]
 fn test_settle_rejected_while_paused() {
     let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
+    let (client, admin) = setup_initialized(&env);
     client.pause();
     let agent = Address::generate(&env);
-    client.settle(&agent, &Symbol::new(&env, "infer"));
+    client.settle(&admin, &agent, &Symbol::new(&env, "infer"));
 }
 
 #[test]
@@ -225,11 +225,11 @@ fn test_is_paused_round_trip() {
 #[test]
 fn test_settle_returns_zero_for_unused_pair() {
     let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
+    let (client, admin) = setup_initialized(&env);
     let agent = Address::generate(&env);
     let svc = Symbol::new(&env, "infer");
     client.set_service_price(&svc, &10i128);
-    assert_eq!(client.settle(&agent, &svc), 0i128);
+    assert_eq!(client.settle(&admin, &agent, &svc), 0i128);
 }
 
 #[test]
@@ -386,7 +386,7 @@ fn test_settle_drains_to_zero_and_stamps_last_settlement() {
     let ts: u64 = 12345;
     env.ledger().with_mut(|li| li.timestamp = ts);
 
-    let (client, _admin) = setup_initialized(&env);
+    let (client, admin) = setup_initialized(&env);
     let agent = Address::generate(&env);
     let svc = Symbol::new(&env, "infer");
     client.set_service_price(&svc, &10i128);
@@ -395,7 +395,7 @@ fn test_settle_drains_to_zero_and_stamps_last_settlement() {
     // No settlement has happened yet for this pair.
     assert_eq!(client.get_last_settlement(&agent, &svc), None);
 
-    let billed = client.settle(&agent, &svc);
+    let billed = client.settle(&admin, &agent, &svc);
 
     assert_eq!(billed, 420i128);
     // Usage drains to exactly zero.
@@ -407,7 +407,7 @@ fn test_settle_drains_to_zero_and_stamps_last_settlement() {
 #[test]
 fn test_settle_billed_matches_compute_billing_for_presettle_state() {
     let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
+    let (client, admin) = setup_initialized(&env);
     let agent = Address::generate(&env);
     let svc = Symbol::new(&env, "infer");
     client.set_service_price(&svc, &7i128);
@@ -417,7 +417,7 @@ fn test_settle_billed_matches_compute_billing_for_presettle_state() {
     let expected = client.compute_billing(&agent, &svc);
     assert_eq!(expected, 91i128);
 
-    let billed = client.settle(&agent, &svc);
+    let billed = client.settle(&admin, &agent, &svc);
     assert_eq!(billed, expected);
     // And compute_billing now reads zero since usage drained.
     assert_eq!(client.compute_billing(&agent, &svc), 0i128);
@@ -426,13 +426,13 @@ fn test_settle_billed_matches_compute_billing_for_presettle_state() {
 #[test]
 fn test_settle_emits_settled_event_with_payload() {
     let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
+    let (client, admin) = setup_initialized(&env);
     let agent = Address::generate(&env);
     let svc = Symbol::new(&env, "infer");
     client.set_service_price(&svc, &10i128);
     client.record_usage(&agent, &svc, &42u32);
 
-    let billed = client.settle(&agent, &svc);
+    let billed = client.settle(&admin, &agent, &svc);
 
     let events = env.events().all();
     assert!(!events.is_empty());
@@ -476,13 +476,13 @@ fn test_settle_zero_usage_returns_zero_stamps_and_emits_event() {
     let ts: u64 = 99_999;
     env.ledger().with_mut(|li| li.timestamp = ts);
 
-    let (client, _admin) = setup_initialized(&env);
+    let (client, admin) = setup_initialized(&env);
     let agent = Address::generate(&env);
     let svc = Symbol::new(&env, "infer");
     client.set_service_price(&svc, &10i128);
 
     // Settle a pair that never recorded any usage.
-    let billed = client.settle(&agent, &svc);
+    let billed = client.settle(&admin, &agent, &svc);
     assert_eq!(billed, 0i128);
 
     // Capture events immediately after `settle`: `events().all()` only
@@ -1981,4 +1981,94 @@ fn test_i22_pause_succeeds_with_admin_auth() {
     client.init(&admin);
     client.pause();
     assert!(client.is_paused());
+// ---------------------------------------------------------------------------
+// Owner-or-admin settlement authorization (#13)
+// ---------------------------------------------------------------------------
+
+/// The registered service owner can settle their own service without the
+/// admin key.
+#[test]
+fn test_owner_can_settle_own_service() {
+    let env = Env::default();
+    let (client, _admin) = setup_initialized(&env);
+    let owner = Address::generate(&env);
+    let agent = Address::generate(&env);
+    let svc = Symbol::new(&env, "infer");
+
+    client.set_service_metadata(&svc, &String::from_str(&env, "inference"), &owner);
+    client.set_service_price(&svc, &10i128);
+    client.record_usage(&agent, &svc, &5u32);
+
+    let billed = client.settle(&owner, &agent, &svc);
+    assert_eq!(billed, 50i128);
+    assert_eq!(client.get_usage(&agent, &svc), 0);
+}
+
+/// The admin can always settle, even a service owned by someone else.
+#[test]
+fn test_admin_can_settle_owned_service() {
+    let env = Env::default();
+    let (client, admin) = setup_initialized(&env);
+    let owner = Address::generate(&env);
+    let agent = Address::generate(&env);
+    let svc = Symbol::new(&env, "infer");
+
+    client.set_service_metadata(&svc, &String::from_str(&env, "inference"), &owner);
+    client.set_service_price(&svc, &10i128);
+    client.record_usage(&agent, &svc, &4u32);
+
+    let billed = client.settle(&admin, &agent, &svc);
+    assert_eq!(billed, 40i128);
+}
+
+/// The owner of service A cannot settle service B (panics #6, the reused
+/// unauthorized-caller error).
+#[test]
+#[should_panic(expected = "Error(Contract, #6)")]
+fn test_owner_cannot_settle_other_service() {
+    let env = Env::default();
+    let (client, _admin) = setup_initialized(&env);
+    let owner_a = Address::generate(&env);
+    let owner_b = Address::generate(&env);
+    let agent = Address::generate(&env);
+    let svc_a = Symbol::new(&env, "svc_a");
+    let svc_b = Symbol::new(&env, "svc_b");
+
+    client.set_service_metadata(&svc_a, &String::from_str(&env, "a"), &owner_a);
+    client.set_service_metadata(&svc_b, &String::from_str(&env, "b"), &owner_b);
+    client.set_service_price(&svc_b, &10i128);
+    client.record_usage(&agent, &svc_b, &3u32);
+
+    // owner_a tries to settle svc_b — unauthorized.
+    client.settle(&owner_a, &agent, &svc_b);
+}
+
+/// A non-admin caller settling a service with no metadata is rejected with
+/// ServiceMetadataNotFound (#13).
+#[test]
+#[should_panic(expected = "Error(Contract, #13)")]
+fn test_nonadmin_settle_without_metadata_rejected() {
+    let env = Env::default();
+    let (client, _admin) = setup_initialized(&env);
+    let stranger = Address::generate(&env);
+    let agent = Address::generate(&env);
+    let svc = Symbol::new(&env, "infer");
+    client.set_service_price(&svc, &10i128);
+    client.record_usage(&agent, &svc, &2u32);
+
+    client.settle(&stranger, &agent, &svc);
+}
+
+/// The pause gate still applies to owner-authorized settlement.
+#[test]
+#[should_panic(expected = "Error(Contract, #4)")]
+fn test_owner_settle_rejected_while_paused() {
+    let env = Env::default();
+    let (client, _admin) = setup_initialized(&env);
+    let owner = Address::generate(&env);
+    let agent = Address::generate(&env);
+    let svc = Symbol::new(&env, "infer");
+    client.set_service_metadata(&svc, &String::from_str(&env, "inference"), &owner);
+    client.pause();
+    client.settle(&owner, &agent, &svc);
 }

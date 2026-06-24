@@ -521,21 +521,46 @@ impl Escrow {
 
     /// Settle the accumulated usage for an `(agent, service_id)` pair.
     ///
-    /// Admin-gated. Computes the outstanding bill (same math as
-    /// `compute_billing`), resets the usage counter to zero, and returns
-    /// the billed amount in stroops. The settlement loop is expected to
-    /// transfer the returned amount off-chain or via a paired token
-    /// contract call; this contract intentionally holds no balance.
-    pub fn settle(env: Env, agent: Address, service_id: Symbol) -> i128 {
+    /// Authorised by `caller`, which must be **either** the global admin
+    /// **or** the `ServiceMetadata(service_id).owner` for that specific
+    /// service. This lets a registered service owner trigger settlement
+    /// for their own service without holding the central admin key, while
+    /// still allowing the admin to settle anything.
+    ///
+    /// Authorization matrix:
+    /// - `caller == admin` → always allowed.
+    /// - `caller == owner` of this service → allowed.
+    /// - service has no metadata/owner and `caller != admin` →
+    ///   [`EscrowError::ServiceMetadataNotFound`].
+    /// - `caller` is some other address → [`EscrowError::NotPendingAdmin`]
+    ///   (reused as the unauthorized-caller error, matching
+    ///   `transfer_service_ownership`).
+    ///
+    /// Computes the outstanding bill (same math as `compute_billing`),
+    /// resets the usage counter to zero, stamps `LastSettlement`, and
+    /// returns the billed amount in stroops. Honours the pause gate and
+    /// emits the `settled` event identically to before.
+    pub fn settle(env: Env, caller: Address, agent: Address, service_id: Symbol) -> i128 {
         if read_flag(&env, &DataKey::Paused) {
             panic_with_error!(&env, EscrowError::ContractPaused);
         }
+        caller.require_auth();
         let admin: Address = env
             .storage()
             .persistent()
             .get(&DataKey::Admin)
             .unwrap_or_else(|| panic_with_error!(&env, EscrowError::NotInitialized));
-        admin.require_auth();
+        if caller != admin {
+            // Non-admin caller must be the registered owner of this service.
+            let meta: ServiceMetadata = env
+                .storage()
+                .persistent()
+                .get(&DataKey::ServiceMetadata(service_id.clone()))
+                .unwrap_or_else(|| panic_with_error!(&env, EscrowError::ServiceMetadataNotFound));
+            if caller != meta.owner {
+                panic_with_error!(&env, EscrowError::NotPendingAdmin);
+            }
+        }
         let usage_key = DataKey::Usage(agent.clone(), service_id.clone());
         let requests: u32 = env.storage().persistent().get(&usage_key).unwrap_or(0);
         let price: i128 = env

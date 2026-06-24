@@ -24,28 +24,23 @@ history are untouched.
 `propose_admin_transfer` rejects proposing the current admin as the new admin
 (panics with `InvalidAdminProposal`). This surfaces no-op handovers as caller
 mistakes rather than silently storing a pending entry equal to the active admin.
-### Per-agent blocklist (deny list)
 
-A per-agent blocklist lets the admin deny specific agents independent of the
-allowlist. `set_agent_blocked(agent, blocked)` (admin-gated) toggles an agent's
-entry and `is_agent_blocked(agent)` reads it back (defaulting to `false` /
-not blocked when never set, so existing behaviour is unchanged when unused).
+### Settlement authorization (admin or service owner)
 
-When a blocked agent calls `record_usage`, the call panics with `AgentBlocked`
-(error `#15`). The blocklist takes **precedence over the allowlist**: an agent
-that is both allow-listed and blocked is still rejected with `AgentBlocked`.
+`settle(caller, agent, service_id)` accepts **either** the global admin **or**
+the `ServiceMetadata(service_id).owner` for that specific service, so a service
+owner can drain their own service without holding the central admin key.
 
-The full `record_usage` rejection precedence is:
+| `caller` | Condition | Result |
+|----------|-----------|--------|
+| admin | always | settles |
+| service owner | `caller == ServiceMetadata(service_id).owner` | settles |
+| non-admin | service has no metadata/owner | `ServiceMetadataNotFound` (#13) |
+| any other address | metadata exists but `caller` isn't the owner | `NotPendingAdmin` (#6, reused as unauthorized) |
 
-1. paused (`ContractPaused`, #4)
-2. zero requests (`RequestsMustBePositive`, #2)
-3. above per-call max (`RequestsExceedsMaxPerCall`, #8)
-4. below per-call min (`RequestsBelowMinPerCall`, #9)
-5. unregistered service under strict registration (`ServiceNotRegistered`, #7)
-6. disabled service (`ServiceDisabled`, #12)
-7. blocked agent (`AgentBlocked`, #15)
-8. agent not on allowlist while enabled (`AgentNotAllowed`, #10)
-
+The owner of service A cannot settle service B. The pause gate and
+counter-drain semantics are unchanged, and the `settled` event is emitted
+identically.
 ### Schema version: fresh v2 init vs. legacy v1→v2 migration
 
 `init` stamps the current storage schema version (v2) directly, so a freshly
