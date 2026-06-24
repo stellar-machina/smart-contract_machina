@@ -1212,6 +1212,15 @@ fn test_i17_record_usage_rejects_below_min() {
     let agent = Address::generate(&env);
     client.record_usage(&agent, &Symbol::new(&env, "infer"), &9u32);
 fn test_i18_disabled_service_rejects_usage() {
+// ---------------------------------------------------------------------------
+// Issue #21 — saturating arithmetic in usage counters and billing math.
+// Drives the per-pair counter, the cross-service lifetime counter, and the
+// billing multiplication to their saturation boundaries instead of letting
+// them wrap or panic.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_i21_per_pair_usage_saturates_at_u32_max() {
     let env = Env::default();
     let (client, _admin) = setup_initialized(&env);
     let agent = Address::generate(&env);
@@ -1244,6 +1253,14 @@ fn test_i18_reenable_service_resumes_usage() {
 
 #[test]
 fn test_i19_total_usage_by_agent_accumulates_across_services() {
+    client.record_usage(&agent, &svc, &u32::MAX);
+    // Adding more saturates at u32::MAX rather than overflowing.
+    assert_eq!(client.record_usage(&agent, &svc, &10u32).requests, u32::MAX);
+    assert_eq!(client.get_usage(&agent, &svc), u32::MAX);
+}
+
+#[test]
+fn test_i21_total_usage_by_agent_saturates() {
     let env = Env::default();
     let (client, _admin) = setup_initialized(&env);
     let agent = Address::generate(&env);
@@ -1257,6 +1274,40 @@ fn test_i19_total_usage_by_agent_accumulates_across_services() {
 
 #[test]
 fn test_i19_total_requests_all_time_sums_across_agents() {
+    client.record_usage(&agent, &a, &u32::MAX);
+    client.record_usage(&agent, &b, &u32::MAX);
+    // The cross-service lifetime counter also saturates at u32::MAX.
+    assert_eq!(client.get_total_usage_by_agent(&agent), u32::MAX);
+}
+
+#[test]
+fn test_i21_compute_billing_saturates_at_i128_max() {
+    let env = Env::default();
+    let (client, _admin) = setup_initialized(&env);
+    let agent = Address::generate(&env);
+    let svc = Symbol::new(&env, "infer");
+    client.set_service_price(&svc, &i128::MAX);
+    client.record_usage(&agent, &svc, &2u32);
+    // 2 * i128::MAX saturates to i128::MAX rather than overflowing.
+    assert_eq!(client.compute_billing(&agent, &svc), i128::MAX);
+}
+
+#[test]
+fn test_i21_settle_returns_saturated_value_and_drains() {
+    let env = Env::default();
+    let (client, _admin) = setup_initialized(&env);
+    let agent = Address::generate(&env);
+    let svc = Symbol::new(&env, "infer");
+    client.set_service_price(&svc, &i128::MAX);
+    client.record_usage(&agent, &svc, &5u32);
+    let billed = client.settle(&agent, &svc);
+    assert_eq!(billed, i128::MAX);
+    // The counter still drains to zero even when billing saturated.
+    assert_eq!(client.get_usage(&agent, &svc), 0);
+}
+
+#[test]
+fn test_i21_total_requests_all_time_accumulates_large_values() {
     let env = Env::default();
     let (client, _admin) = setup_initialized(&env);
     let a1 = Address::generate(&env);
@@ -1380,4 +1431,8 @@ fn test_i20_double_migrate_guard_rejects_on_v2() {
     let (client, _admin) = setup_initialized(&env);
     // Already at v2, so the v1->v2 migration refuses with #11.
     client.migrate_v1_to_v2();
+    // u64 protocol counter comfortably sums two u32::MAX increments.
+    client.record_usage(&a1, &svc, &u32::MAX);
+    client.record_usage(&a2, &svc, &u32::MAX);
+    assert_eq!(client.get_total_requests_all_time(), (u32::MAX as u64) * 2);
 }
