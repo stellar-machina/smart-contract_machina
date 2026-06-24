@@ -99,6 +99,9 @@ pub enum DataKey {
     /// where `window_start` is the ledger timestamp the current window
     /// opened and `count` is the requests accumulated in it so far.
     RateWindow(Address),
+    /// Per-agent blocklist flag. When `true`, `record_usage` rejects the
+    /// agent with `AgentBlocked`, taking precedence over the allowlist.
+    AgentBlocked(Address),
 }
 
 /// Typed contract errors. Codes are append-only to keep client SDKs stable.
@@ -145,6 +148,11 @@ pub enum EscrowError {
     /// `record_usage` would push the agent's per-window request count
     /// above the configured `MaxRequestsPerWindow` cap.
     RateLimitExceeded = 15,
+    /// `get_usage_batch` was called with more than `MAX_BATCH_READ` pairs.
+    BatchTooLarge = 16,
+    /// `record_usage` was called by/for an agent on the per-agent
+    /// blocklist. Takes precedence over the allowlist.
+    AgentBlocked = 17,
 }
 
 #[contracttype]

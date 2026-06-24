@@ -3,8 +3,8 @@
 
 use super::*;
 use soroban_sdk::{
-    testutils::{Address as _, Events, Ledger},
-    Address, IntoVal, Symbol, Vec,
+    testutils::{Address as _, Events, Ledger, MockAuth, MockAuthInvoke},
+    Address, IntoVal, Symbol,
 };
 
 fn setup_initialized(env: &Env) -> (EscrowClient<'_>, Address) {
@@ -19,7 +19,7 @@ fn setup_initialized(env: &Env) -> (EscrowClient<'_>, Address) {
 #[test]
 fn test_version() {
     let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
+    let (client, admin) = setup_initialized(&env);
     let v = client.version();
     assert_eq!(v, 2);
 }
@@ -35,7 +35,7 @@ fn test_init_persists_admin() {
 #[should_panic(expected = "Error(Contract, #1)")]
 fn test_init_rejects_double_init() {
     let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
+    let (client, admin) = setup_initialized(&env);
     let other_admin = Address::generate(&env);
     client.init(&other_admin);
 }
@@ -43,7 +43,7 @@ fn test_init_rejects_double_init() {
 #[test]
 fn test_record_usage() {
     let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
+    let (client, admin) = setup_initialized(&env);
 
     let agent = Address::generate(&env);
     let service_id = Symbol::new(&env, "weather_api");
@@ -59,7 +59,7 @@ fn test_record_usage() {
 #[test]
 fn test_record_usage_accumulates_across_calls() {
     let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
+    let (client, admin) = setup_initialized(&env);
 
     let agent = Address::generate(&env);
     let service_id = Symbol::new(&env, "weather_api");
@@ -77,7 +77,7 @@ fn test_record_usage_accumulates_across_calls() {
 #[test]
 fn test_record_usage_is_keyed_per_service() {
     let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
+    let (client, admin) = setup_initialized(&env);
 
     let agent = Address::generate(&env);
     let weather = Symbol::new(&env, "weather_api");
@@ -93,7 +93,7 @@ fn test_record_usage_is_keyed_per_service() {
 #[test]
 fn test_get_usage_returns_zero_for_unknown_pair() {
     let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
+    let (client, admin) = setup_initialized(&env);
     let unseen_agent = Address::generate(&env);
     let svc = Symbol::new(&env, "anything");
     assert_eq!(client.get_usage(&unseen_agent, &svc), 0);
@@ -102,14 +102,14 @@ fn test_get_usage_returns_zero_for_unknown_pair() {
 #[test]
 fn test_set_service_price_admin_can_write() {
     let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
+    let (client, admin) = setup_initialized(&env);
     client.set_service_price(&Symbol::new(&env, "infer"), &500i128);
 }
 
 #[test]
 fn test_get_service_price_round_trip() {
     let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
+    let (client, admin) = setup_initialized(&env);
     let svc = Symbol::new(&env, "infer");
     client.set_service_price(&svc, &500i128);
     assert_eq!(client.get_service_price(&svc), 500i128);
@@ -118,7 +118,7 @@ fn test_get_service_price_round_trip() {
 #[test]
 fn test_get_service_price_defaults_to_zero() {
     let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
+    let (client, admin) = setup_initialized(&env);
     assert_eq!(
         client.get_service_price(&Symbol::new(&env, "never_set")),
         0i128
@@ -128,7 +128,7 @@ fn test_get_service_price_defaults_to_zero() {
 #[test]
 fn test_compute_billing_basic() {
     let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
+    let (client, admin) = setup_initialized(&env);
     let agent = Address::generate(&env);
     let svc = Symbol::new(&env, "infer");
     client.set_service_price(&svc, &10i128);
@@ -152,14 +152,14 @@ fn test_settle_drains_usage_and_returns_billed() {
 #[test]
 fn test_pause_admin_can_pause() {
     let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
+    let (client, admin) = setup_initialized(&env);
     client.pause();
 }
 
 #[test]
 fn test_unpause_admin_can_unpause() {
     let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
+    let (client, admin) = setup_initialized(&env);
     client.pause();
     client.unpause();
 }
@@ -178,7 +178,7 @@ fn test_settle_rejected_while_paused() {
 #[should_panic(expected = "Error(Contract, #4)")]
 fn test_record_usage_rejected_while_paused() {
     let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
+    let (client, admin) = setup_initialized(&env);
     client.pause();
     let agent = Address::generate(&env);
     client.record_usage(&agent, &Symbol::new(&env, "infer"), &1u32);
@@ -187,7 +187,7 @@ fn test_record_usage_rejected_while_paused() {
 #[test]
 fn test_propose_admin_transfer_persists_pending() {
     let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
+    let (client, admin) = setup_initialized(&env);
     let next = Address::generate(&env);
     client.propose_admin_transfer(&next);
 }
@@ -195,7 +195,7 @@ fn test_propose_admin_transfer_persists_pending() {
 #[test]
 fn test_accept_admin_transfer_rotates_admin() {
     let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
+    let (client, admin) = setup_initialized(&env);
     let next = Address::generate(&env);
     client.propose_admin_transfer(&next);
     client.accept_admin_transfer(&next);
@@ -206,7 +206,7 @@ fn test_accept_admin_transfer_rotates_admin() {
 #[should_panic(expected = "Error(Contract, #5)")]
 fn test_accept_admin_transfer_panics_with_no_pending() {
     let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
+    let (client, admin) = setup_initialized(&env);
     let caller = Address::generate(&env);
     client.accept_admin_transfer(&caller);
 }
@@ -214,7 +214,7 @@ fn test_accept_admin_transfer_panics_with_no_pending() {
 #[test]
 fn test_is_paused_round_trip() {
     let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
+    let (client, admin) = setup_initialized(&env);
     assert!(!client.is_paused());
     client.pause();
     assert!(client.is_paused());
@@ -235,7 +235,7 @@ fn test_settle_returns_zero_for_unused_pair() {
 #[test]
 fn test_compute_billing_zero_when_unpriced_or_unused() {
     let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
+    let (client, admin) = setup_initialized(&env);
     let agent = Address::generate(&env);
     let svc = Symbol::new(&env, "infer");
     // no price, no usage
@@ -249,7 +249,7 @@ fn test_compute_billing_zero_when_unpriced_or_unused() {
 #[should_panic(expected = "Error(Contract, #2)")]
 fn test_record_usage_rejects_zero_requests() {
     let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
+    let (client, admin) = setup_initialized(&env);
     let agent = Address::generate(&env);
     let service_id = Symbol::new(&env, "weather_api");
     client.record_usage(&agent, &service_id, &0u32);
@@ -258,7 +258,7 @@ fn test_record_usage_rejects_zero_requests() {
 #[test]
 fn test_bool_flag_accessor_round_trip() {
     let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
+    let (client, admin) = setup_initialized(&env);
     // Defaults to false when unset.
     assert!(!client.is_allowlist_enabled());
     // Round-trips true then false through the centralised accessors.
@@ -271,7 +271,7 @@ fn test_bool_flag_accessor_round_trip() {
 #[test]
 fn test_transfer_service_ownership_by_owner_preserves_description() {
     let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
+    let (client, admin) = setup_initialized(&env);
     let svc = Symbol::new(&env, "infer");
     let owner = Address::generate(&env);
     let new_owner = Address::generate(&env);
@@ -306,7 +306,7 @@ fn test_transfer_service_ownership_by_admin() {
 #[should_panic(expected = "Error(Contract, #13)")]
 fn test_transfer_service_ownership_missing_metadata_panics() {
     let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
+    let (client, admin) = setup_initialized(&env);
     let svc = Symbol::new(&env, "never_set");
     let caller = Address::generate(&env);
     let new_owner = Address::generate(&env);
@@ -316,7 +316,7 @@ fn test_transfer_service_ownership_missing_metadata_panics() {
 #[test]
 fn test_clear_service_metadata_removes_entry() {
     let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
+    let (client, admin) = setup_initialized(&env);
     let svc = Symbol::new(&env, "infer");
     let owner = Address::generate(&env);
     let desc = String::from_str(&env, "inference service");
@@ -330,7 +330,7 @@ fn test_clear_service_metadata_removes_entry() {
 #[test]
 fn test_clear_service_metadata_is_idempotent() {
     let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
+    let (client, admin) = setup_initialized(&env);
     let svc = Symbol::new(&env, "never_set");
     // Clearing a never-set entry is a no-op (no panic).
     client.clear_service_metadata(&svc);
@@ -340,7 +340,7 @@ fn test_clear_service_metadata_is_idempotent() {
 #[test]
 fn test_clear_service_metadata_leaves_registration_untouched() {
     let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
+    let (client, admin) = setup_initialized(&env);
     let svc = Symbol::new(&env, "infer");
     let owner = Address::generate(&env);
     let desc = String::from_str(&env, "inference service");
@@ -364,7 +364,7 @@ fn test_propose_admin_transfer_rejects_self_target() {
 #[test]
 fn test_propose_admin_transfer_accepts_distinct_address() {
     let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
+    let (client, admin) = setup_initialized(&env);
     let next = Address::generate(&env);
     client.propose_admin_transfer(&next);
     assert_eq!(client.get_pending_admin(), Some(next));
@@ -373,7 +373,7 @@ fn test_propose_admin_transfer_accepts_distinct_address() {
 #[test]
 fn test_accept_admin_transfer_clears_pending() {
     let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
+    let (client, admin) = setup_initialized(&env);
     let next = Address::generate(&env);
     client.propose_admin_transfer(&next);
     client.accept_admin_transfer(&next);
@@ -450,7 +450,7 @@ fn test_settle_emits_settled_event_with_payload() {
 #[test]
 fn test_record_usage_emits_usage_event_with_payload() {
     let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
+    let (client, admin) = setup_initialized(&env);
     let agent = Address::generate(&env);
     let svc = Symbol::new(&env, "weather_api");
 
@@ -504,7 +504,7 @@ fn test_settle_zero_usage_returns_zero_stamps_and_emits_event() {
 #[test]
 fn test_init_stamps_schema_version() {
     let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
+    let (client, admin) = setup_initialized(&env);
     assert_eq!(client.get_schema_version(), 2);
 }
 
@@ -512,14 +512,14 @@ fn test_init_stamps_schema_version() {
 #[should_panic(expected = "Error(Contract, #11)")]
 fn test_migrate_v1_to_v2_rejected_on_fresh_v2_init() {
     let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
+    let (client, admin) = setup_initialized(&env);
     client.migrate_v1_to_v2();
 }
 
 #[test]
 fn test_set_service_metadata_round_trips_description_and_owner() {
     let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
+    let (client, admin) = setup_initialized(&env);
     let svc = Symbol::new(&env, "infer");
     let owner = Address::generate(&env);
     let description = String::from_str(&env, "GPU inference endpoint");
@@ -534,7 +534,7 @@ fn test_set_service_metadata_round_trips_description_and_owner() {
 #[test]
 fn test_get_service_metadata_returns_none_when_never_set() {
     let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
+    let (client, admin) = setup_initialized(&env);
     let svc = Symbol::new(&env, "never_set");
     assert_eq!(client.get_service_metadata(&svc), None);
 }
@@ -542,7 +542,7 @@ fn test_get_service_metadata_returns_none_when_never_set() {
 #[test]
 fn test_register_service_does_not_set_disabled_flag() {
     let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
+    let (client, admin) = setup_initialized(&env);
     let svc = Symbol::new(&env, "infer");
 
     client.register_service(&svc);
@@ -555,7 +555,7 @@ fn test_register_service_does_not_set_disabled_flag() {
 #[test]
 fn test_disable_preserves_registration_and_metadata() {
     let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
+    let (client, admin) = setup_initialized(&env);
     let svc = Symbol::new(&env, "infer");
     let owner = Address::generate(&env);
     let description = String::from_str(&env, "GPU inference endpoint");
@@ -576,7 +576,7 @@ fn test_disable_preserves_registration_and_metadata() {
 #[test]
 fn test_unregister_service_does_not_clear_metadata_or_disabled_flag() {
     let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
+    let (client, admin) = setup_initialized(&env);
     let svc = Symbol::new(&env, "infer");
     let owner = Address::generate(&env);
     let description = String::from_str(&env, "GPU inference endpoint");
@@ -599,7 +599,7 @@ fn test_unregister_service_does_not_clear_metadata_or_disabled_flag() {
 #[test]
 fn test_service_slot_toggle_matrix_is_independent() {
     let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
+    let (client, admin) = setup_initialized(&env);
     let svc = Symbol::new(&env, "infer");
 
     // Baseline: every slot reads its default for a fresh service id.
@@ -626,7 +626,7 @@ fn test_service_slot_toggle_matrix_is_independent() {
 #[test]
 fn test_pause_emits_paused_event_true() {
     let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
+    let (client, admin) = setup_initialized(&env);
 
     client.pause();
 
@@ -646,7 +646,7 @@ fn test_pause_emits_paused_event_true() {
 #[test]
 fn test_unpause_emits_paused_event_false() {
     let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
+    let (client, admin) = setup_initialized(&env);
     client.pause();
 
     client.unpause();
@@ -665,7 +665,7 @@ fn test_unpause_emits_paused_event_false() {
 #[test]
 fn test_double_pause_is_idempotent() {
     let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
+    let (client, admin) = setup_initialized(&env);
 
     client.pause();
     assert!(client.is_paused());
@@ -677,7 +677,7 @@ fn test_double_pause_is_idempotent() {
 #[test]
 fn test_double_unpause_is_idempotent() {
     let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
+    let (client, admin) = setup_initialized(&env);
 
     // Unpausing a never-paused contract is a no-op and stays unpaused.
     client.unpause();
@@ -689,7 +689,7 @@ fn test_double_unpause_is_idempotent() {
 #[test]
 fn test_pause_pause_unpause_ends_unpaused() {
     let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
+    let (client, admin) = setup_initialized(&env);
 
     client.pause();
     client.pause();
@@ -698,14 +698,10 @@ fn test_pause_pause_unpause_ends_unpaused() {
     assert!(!client.is_paused());
 }
 
-// --- Arithmetic overflow/saturation policy (see docs/escrow/arithmetic.md) ---
-
 #[test]
 fn test_per_pair_usage_saturates_at_u32_max() {
-#[test]
-fn test_get_usage_batch_preserves_order() {
     let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
+    let (client, admin) = setup_initialized(&env);
 
     let agent = Address::generate(&env);
     let service_id = Symbol::new(&env, "weather_api");
@@ -722,7 +718,7 @@ fn test_get_usage_batch_preserves_order() {
 #[test]
 fn test_total_usage_by_agent_saturates_at_u32_max() {
     let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
+    let (client, admin) = setup_initialized(&env);
 
     let agent = Address::generate(&env);
     // Two distinct services so the per-pair counters do not themselves clamp
@@ -754,6 +750,233 @@ fn test_compute_billing_saturates_at_i128_max() {
 
 #[test]
 fn test_compute_billing_zero_price_is_zero() {
+    let env = Env::default();
+    let (client, admin) = setup_initialized(&env);
+
+    let agent = Address::generate(&env);
+    let service_id = Symbol::new(&env, "free_api");
+
+    // Zero price (free service): any usage bills to zero.
+    client.set_service_price(&service_id, &0i128);
+    client.record_usage(&agent, &service_id, &1000u32);
+
+    assert_eq!(client.compute_billing(&agent, &service_id), 0);
+}
+
+#[test]
+fn test_settle_unused_pair_returns_zero() {
+    let env = Env::default();
+    let (client, admin) = setup_initialized(&env);
+
+    let agent = Address::generate(&env);
+    let service_id = Symbol::new(&env, "never_used");
+
+    // No usage recorded and no price set: settle bills zero.
+    assert_eq!(client.settle(&admin, &agent, &service_id), 0);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #4)")]
+fn test_set_service_price_rejected_while_paused() {
+    let env = Env::default();
+    let (client, admin) = setup_initialized(&env);
+    client.pause();
+    client.set_service_price(&Symbol::new(&env, "infer"), &500i128);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #4)")]
+fn test_register_service_rejected_while_paused() {
+    let env = Env::default();
+    let (client, admin) = setup_initialized(&env);
+    client.pause();
+    client.register_service(&Symbol::new(&env, "infer"));
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #4)")]
+fn test_set_agent_allowed_rejected_while_paused() {
+    let env = Env::default();
+    let (client, admin) = setup_initialized(&env);
+    client.pause();
+    let agent = Address::generate(&env);
+    client.set_agent_allowed(&agent, &true);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #4)")]
+fn test_set_service_metadata_rejected_while_paused() {
+    let env = Env::default();
+    let (client, admin) = setup_initialized(&env);
+    client.pause();
+    let owner = Address::generate(&env);
+    client.set_service_metadata(
+        &Symbol::new(&env, "infer"),
+        &String::from_str(&env, "desc"),
+        &owner,
+    );
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #4)")]
+fn test_clear_service_metadata_rejected_while_paused() {
+    let env = Env::default();
+    let (client, admin) = setup_initialized(&env);
+    client.pause();
+    client.clear_service_metadata(&Symbol::new(&env, "infer"));
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #4)")]
+fn test_set_max_requests_per_call_rejected_while_paused() {
+    let env = Env::default();
+    let (client, admin) = setup_initialized(&env);
+    client.pause();
+    client.set_max_requests_per_call(&10u32);
+}
+
+#[test]
+fn test_unpause_works_while_paused() {
+    let env = Env::default();
+    let (client, admin) = setup_initialized(&env);
+    client.pause();
+    assert!(client.is_paused());
+    // Lifecycle control must remain callable during an incident.
+    client.unpause();
+    assert!(!client.is_paused());
+}
+
+#[test]
+fn test_getter_works_while_paused() {
+    let env = Env::default();
+    let (client, admin) = setup_initialized(&env);
+    let svc = Symbol::new(&env, "infer");
+    client.set_service_price(&svc, &500i128);
+    client.pause();
+    // Read getters must remain callable while paused.
+    assert_eq!(client.get_service_price(&svc), 500i128);
+}
+
+#[test]
+fn test_register_service_with_metadata_sets_flag_and_metadata() {
+    let env = Env::default();
+    let (client, admin) = setup_initialized(&env);
+    let svc = Symbol::new(&env, "infer");
+    let owner = Address::generate(&env);
+    let description = String::from_str(&env, "GPU inference endpoint");
+
+    client.register_service_with_metadata(&svc, &description, &owner);
+
+    // A single call sets both the registration flag and the metadata.
+    assert!(client.is_service_registered(&svc));
+    let meta = client.get_service_metadata(&svc).unwrap();
+    assert_eq!(meta.description, description);
+    assert_eq!(meta.owner, owner);
+}
+
+#[test]
+fn test_register_service_with_metadata_emits_svc_reg_event() {
+    let env = Env::default();
+    let (client, admin) = setup_initialized(&env);
+    let svc = Symbol::new(&env, "infer");
+    let owner = Address::generate(&env);
+    let description = String::from_str(&env, "GPU inference endpoint");
+
+    client.register_service_with_metadata(&svc, &description, &owner);
+
+    let events = env.events().all();
+    assert!(!events.is_empty());
+    let (_addr, topics, data) = events.last().unwrap();
+    let expected_topics: soroban_sdk::Vec<soroban_sdk::Val> =
+        (symbol_short!("svc_reg"),).into_val(&env);
+    assert_eq!(topics, expected_topics);
+    let decoded: (Symbol, Address) = data.into_val(&env);
+    assert_eq!(decoded, (svc.clone(), owner.clone()));
+}
+
+#[test]
+fn test_register_service_with_metadata_overwrites_idempotently() {
+    let env = Env::default();
+    let (client, admin) = setup_initialized(&env);
+    let svc = Symbol::new(&env, "infer");
+    let owner1 = Address::generate(&env);
+    let owner2 = Address::generate(&env);
+    let desc1 = String::from_str(&env, "first");
+    let desc2 = String::from_str(&env, "second");
+
+    client.register_service_with_metadata(&svc, &desc1, &owner1);
+    // Re-registering the same id overwrites the metadata and keeps it registered.
+    client.register_service_with_metadata(&svc, &desc2, &owner2);
+
+    assert!(client.is_service_registered(&svc));
+    let meta = client.get_service_metadata(&svc).unwrap();
+    assert_eq!(meta.description, desc2);
+    assert_eq!(meta.owner, owner2);
+}
+
+#[test]
+fn test_register_service_with_metadata_allows_empty_description() {
+    let env = Env::default();
+    let (client, admin) = setup_initialized(&env);
+    let svc = Symbol::new(&env, "infer");
+    let owner = Address::generate(&env);
+    let empty = String::from_str(&env, "");
+
+    client.register_service_with_metadata(&svc, &empty, &owner);
+
+    assert!(client.is_service_registered(&svc));
+    let meta = client.get_service_metadata(&svc).unwrap();
+    assert_eq!(meta.description, empty);
+    assert_eq!(meta.owner, owner);
+}
+
+#[test]
+#[should_panic]
+fn test_register_service_with_metadata_rejects_non_admin() {
+    let env = Env::default();
+    let contract_id = env.register_contract(None, Escrow);
+    let client = EscrowClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    env.mock_all_auths();
+    client.init(&admin);
+
+    // Clear all authorizations so the admin.require_auth() inside the
+    // entrypoint has nothing to satisfy it and the call is rejected.
+    let svc = Symbol::new(&env, "infer");
+    let owner = Address::generate(&env);
+    let description = String::from_str(&env, "GPU inference endpoint");
+    env.set_auths(&[]);
+    client.register_service_with_metadata(&svc, &description, &owner);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #3)")]
+fn test_set_service_price_panics_not_initialized_before_init() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, Escrow);
+    let client = EscrowClient::new(&env, &contract_id);
+    // No init() call: require_admin must still panic NotInitialized (#3).
+    client.set_service_price(&Symbol::new(&env, "infer"), &500i128);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #4)")]
+fn test_record_usage_paused_gate_via_helper() {
+    let env = Env::default();
+    let (client, admin) = setup_initialized(&env);
+    client.pause();
+    let agent = Address::generate(&env);
+    // ensure_not_paused must still panic ContractPaused (#4) while paused.
+    client.record_usage(&agent, &Symbol::new(&env, "infer"), &1u32);
+}
+
+#[test]
+fn test_get_usage_batch_preserves_order() {
+    let env = Env::default();
+    let (client, admin) = setup_initialized(&env);
+
+    let agent = Address::generate(&env);
     let svc_a = Symbol::new(&env, "svc_a");
     let svc_b = Symbol::new(&env, "svc_b");
     let svc_c = Symbol::new(&env, "svc_c");
@@ -777,20 +1000,9 @@ fn test_compute_billing_zero_price_is_zero() {
 #[test]
 fn test_get_usage_batch_unknown_pairs_return_zero() {
     let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
+    let (client, admin) = setup_initialized(&env);
 
     let agent = Address::generate(&env);
-    let service_id = Symbol::new(&env, "free_api");
-
-    // Zero price (free service): any usage bills to zero.
-    client.set_service_price(&service_id, &0i128);
-    client.record_usage(&agent, &service_id, &1000u32);
-
-    assert_eq!(client.compute_billing(&agent, &service_id), 0);
-}
-
-#[test]
-fn test_settle_unused_pair_returns_zero() {
     let svc = Symbol::new(&env, "never_used");
 
     let mut pairs: Vec<(Address, Symbol)> = Vec::new(&env);
@@ -804,37 +1016,345 @@ fn test_settle_unused_pair_returns_zero() {
 #[test]
 fn test_get_usage_batch_mix_known_and_unknown() {
     let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
+    let (client, admin) = setup_initialized(&env);
 
     let agent = Address::generate(&env);
-    let service_id = Symbol::new(&env, "never_used");
+    let known = Symbol::new(&env, "known");
+    let unknown = Symbol::new(&env, "unknown");
 
-    // No usage recorded and no price set: settle bills zero.
-    assert_eq!(client.settle(&agent, &service_id), 0);
-// --- Pause gate coverage for config-mutation entrypoints (issue #23) ---
-// Every admin config mutation must respect the emergency-stop flag. These
-// assert each representative entrypoint panics with ContractPaused (#4)
-// once the contract is paused.
+    client.record_usage(&agent, &known, &7u32);
+
+    let mut pairs: Vec<(Address, Symbol)> = Vec::new(&env);
+    pairs.push_back((agent.clone(), unknown.clone()));
+    pairs.push_back((agent.clone(), known.clone()));
+
+    let out = client.get_usage_batch(&pairs);
+    assert_eq!(out.get(0), Some(0));
+    assert_eq!(out.get(1), Some(7));
+}
+
+#[test]
+fn test_get_usage_batch_duplicate_pairs() {
+    let env = Env::default();
+    let (client, admin) = setup_initialized(&env);
+
+    let agent = Address::generate(&env);
+    let svc = Symbol::new(&env, "dup_svc");
+    client.record_usage(&agent, &svc, &42u32);
+
+    let mut pairs: Vec<(Address, Symbol)> = Vec::new(&env);
+    pairs.push_back((agent.clone(), svc.clone()));
+    pairs.push_back((agent.clone(), svc.clone()));
+    pairs.push_back((agent.clone(), svc.clone()));
+
+    let out = client.get_usage_batch(&pairs);
+    assert_eq!(out.len(), 3);
+    assert_eq!(out.get(0), Some(42));
+    assert_eq!(out.get(1), Some(42));
+    assert_eq!(out.get(2), Some(42));
+}
+
+#[test]
+fn test_get_usage_batch_empty_returns_empty() {
+    let env = Env::default();
+    let (client, admin) = setup_initialized(&env);
+
+    let pairs: Vec<(Address, Symbol)> = Vec::new(&env);
+    let out = client.get_usage_batch(&pairs);
+    assert_eq!(out.len(), 0);
+}
+
+#[test]
+fn test_get_usage_batch_at_bound_succeeds() {
+    let env = Env::default();
+    let (client, admin) = setup_initialized(&env);
+
+    let agent = Address::generate(&env);
+    let svc = Symbol::new(&env, "bound_svc");
+    client.record_usage(&agent, &svc, &5u32);
+
+    let mut pairs: Vec<(Address, Symbol)> = Vec::new(&env);
+    for _ in 0..MAX_BATCH_READ {
+        pairs.push_back((agent.clone(), svc.clone()));
+    }
+    assert_eq!(pairs.len(), MAX_BATCH_READ);
+
+    let out = client.get_usage_batch(&pairs);
+    assert_eq!(out.len(), MAX_BATCH_READ);
+    assert_eq!(out.get(0), Some(5));
+    assert_eq!(out.get(MAX_BATCH_READ - 1), Some(5));
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #16)")]
+fn test_get_usage_batch_oversized_panics() {
+    let env = Env::default();
+    let (client, admin) = setup_initialized(&env);
+
+    let agent = Address::generate(&env);
+    let svc = Symbol::new(&env, "over_svc");
+
+    let mut pairs: Vec<(Address, Symbol)> = Vec::new(&env);
+    for _ in 0..(MAX_BATCH_READ + 1) {
+        pairs.push_back((agent.clone(), svc.clone()));
+    }
+    assert_eq!(pairs.len(), MAX_BATCH_READ + 1);
+
+    client.get_usage_batch(&pairs);
+}
 
 #[test]
 #[should_panic(expected = "Error(Contract, #4)")]
-fn test_set_service_price_rejected_while_paused() {
+fn test_record_usage_paused_beats_zero_requests() {
+    // Paused (#4) must win even when requests == 0 (which would be #2).
     let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
+    let (client, admin) = setup_initialized(&env);
     client.pause();
-    client.set_service_price(&Symbol::new(&env, "infer"), &500i128);
+    let agent = Address::generate(&env);
+    let service_id = Symbol::new(&env, "weather_api");
+    client.record_usage(&agent, &service_id, &0u32);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #2)")]
+fn test_record_usage_zero_requests_beats_max() {
+    // Zero-requests (#2) must win over the max cap (#8): with max=5 and
+    // requests=0, the zero check fires first.
+    let env = Env::default();
+    let (client, admin) = setup_initialized(&env);
+    client.set_max_requests_per_call(&5u32);
+    let agent = Address::generate(&env);
+    let service_id = Symbol::new(&env, "weather_api");
+    client.record_usage(&agent, &service_id, &0u32);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #8)")]
+fn test_record_usage_max_beats_min() {
+    // Max (#8) must win over min (#9): with max=5 and min=10 (an
+    // inconsistent config), a request above max trips #8 first.
+    let env = Env::default();
+    let (client, admin) = setup_initialized(&env);
+    client.set_max_requests_per_call(&5u32);
+    client.set_min_requests_per_call(&10u32);
+    let agent = Address::generate(&env);
+    let service_id = Symbol::new(&env, "weather_api");
+    client.record_usage(&agent, &service_id, &6u32);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #9)")]
+fn test_record_usage_min_beats_registration() {
+    // Min (#9) must win over the registration gate (#7): with min=10 and
+    // strict registration required (service unregistered), a below-min
+    // request trips #9 before #7.
+    let env = Env::default();
+    let (client, admin) = setup_initialized(&env);
+    client.set_min_requests_per_call(&10u32);
+    client.set_require_service_registration(&true);
+    let agent = Address::generate(&env);
+    let service_id = Symbol::new(&env, "weather_api");
+    client.record_usage(&agent, &service_id, &3u32);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #7)")]
+fn test_record_usage_registration_beats_disabled() {
+    // Registration (#7) must win over disabled (#12): require registration,
+    // leave the service unregistered, and also disable it. #7 fires first.
+    let env = Env::default();
+    let (client, admin) = setup_initialized(&env);
+    client.set_require_service_registration(&true);
+    let service_id = Symbol::new(&env, "weather_api");
+    client.set_service_disabled(&service_id, &true);
+    let agent = Address::generate(&env);
+    client.record_usage(&agent, &service_id, &5u32);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #12)")]
+fn test_record_usage_disabled_beats_allowlist() {
+    // Disabled (#12) must win over the allowlist (#10): disable a registered
+    // service and enable a (non-matching) allowlist. #12 fires first.
+    let env = Env::default();
+    let (client, admin) = setup_initialized(&env);
+    let service_id = Symbol::new(&env, "weather_api");
+    client.register_service(&service_id);
+    client.set_service_disabled(&service_id, &true);
+    client.set_allowlist_enabled(&true);
+    let agent = Address::generate(&env);
+    client.record_usage(&agent, &service_id, &5u32);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #10)")]
+fn test_record_usage_allowlist_fires_when_enabled_and_not_allowed() {
+    // Allowlist (#10) fires when enabled and the agent is not allowed.
+    let env = Env::default();
+    let (client, admin) = setup_initialized(&env);
+    client.set_allowlist_enabled(&true);
+    let agent = Address::generate(&env);
+    let service_id = Symbol::new(&env, "weather_api");
+    client.record_usage(&agent, &service_id, &5u32);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #7)")]
+fn test_record_usage_registration_fires_when_required_and_unregistered() {
+    // Registration (#7) fires when required and the service is unregistered.
+    let env = Env::default();
+    let (client, admin) = setup_initialized(&env);
+    client.set_require_service_registration(&true);
+    let agent = Address::generate(&env);
+    let service_id = Symbol::new(&env, "weather_api");
+    client.record_usage(&agent, &service_id, &5u32);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #12)")]
+fn test_record_usage_disabled_fires_when_service_disabled() {
+    // Disabled (#12) fires when the service is disabled.
+    let env = Env::default();
+    let (client, admin) = setup_initialized(&env);
+    let service_id = Symbol::new(&env, "weather_api");
+    client.set_service_disabled(&service_id, &true);
+    let agent = Address::generate(&env);
+    client.record_usage(&agent, &service_id, &5u32);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #8)")]
+fn test_record_usage_max_fires_above_cap() {
+    // Max (#8) fires when requests exceed the configured cap.
+    let env = Env::default();
+    let (client, admin) = setup_initialized(&env);
+    client.set_max_requests_per_call(&5u32);
+    let agent = Address::generate(&env);
+    let service_id = Symbol::new(&env, "weather_api");
+    client.record_usage(&agent, &service_id, &6u32);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #9)")]
+fn test_record_usage_min_fires_below_floor() {
+    // Min (#9) fires when requests fall below the configured floor.
+    let env = Env::default();
+    let (client, admin) = setup_initialized(&env);
+    client.set_min_requests_per_call(&10u32);
+    let agent = Address::generate(&env);
+    let service_id = Symbol::new(&env, "weather_api");
+    client.record_usage(&agent, &service_id, &3u32);
+}
+
+#[test]
+fn test_record_usage_passes_all_gates_when_satisfied() {
+    // Sanity: with every gate enabled and satisfied, record_usage succeeds.
+    let env = Env::default();
+    let (client, admin) = setup_initialized(&env);
+    let service_id = Symbol::new(&env, "weather_api");
+    let agent = Address::generate(&env);
+    client.set_max_requests_per_call(&100u32);
+    client.set_min_requests_per_call(&1u32);
+    client.set_require_service_registration(&true);
+    client.register_service(&service_id);
+    client.set_allowlist_enabled(&true);
+    client.set_agent_allowed(&agent, &true);
+
+    let record = client.record_usage(&agent, &service_id, &5u32);
+    assert_eq!(record.requests, 5);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #17)")]
+fn test_record_usage_rejects_blocked_agent() {
+    let env = Env::default();
+    let (client, admin) = setup_initialized(&env);
+    let agent = Address::generate(&env);
+    let svc = Symbol::new(&env, "infer");
+
+    client.set_agent_blocked(&agent, &true);
+    client.record_usage(&agent, &svc, &1u32);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #17)")]
+fn test_blocklist_takes_precedence_over_allowlist() {
+    let env = Env::default();
+    let (client, admin) = setup_initialized(&env);
+    let agent = Address::generate(&env);
+    let svc = Symbol::new(&env, "infer");
+
+    // Enable the allowlist and explicitly allow the agent...
+    client.set_allowlist_enabled(&true);
+    client.set_agent_allowed(&agent, &true);
+    // ...but also block it: the block must win.
+    client.set_agent_blocked(&agent, &true);
+    client.record_usage(&agent, &svc, &1u32);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #17)")]
+fn test_blocked_agent_rejected_while_allowlist_disabled() {
+    let env = Env::default();
+    let (client, admin) = setup_initialized(&env);
+    let agent = Address::generate(&env);
+    let svc = Symbol::new(&env, "infer");
+
+    // Allowlist stays disabled (its default); the block alone rejects.
+    assert!(!client.is_allowlist_enabled());
+    client.set_agent_blocked(&agent, &true);
+    client.record_usage(&agent, &svc, &1u32);
+}
+
+#[test]
+fn test_unblock_then_record_succeeds() {
+    let env = Env::default();
+    let (client, admin) = setup_initialized(&env);
+    let agent = Address::generate(&env);
+    let svc = Symbol::new(&env, "infer");
+
+    client.set_agent_blocked(&agent, &true);
+    client.set_agent_blocked(&agent, &false);
+
+    let record = client.record_usage(&agent, &svc, &5u32);
+    assert_eq!(record.requests, 5);
+    assert_eq!(client.get_usage(&agent, &svc), 5);
+}
+
+#[test]
+fn test_is_agent_blocked_round_trip() {
+    let env = Env::default();
+    let (client, admin) = setup_initialized(&env);
+    let agent = Address::generate(&env);
+
+    // Defaults to false when never set.
+    assert!(!client.is_agent_blocked(&agent));
+    client.set_agent_blocked(&agent, &true);
+    assert!(client.is_agent_blocked(&agent));
+    client.set_agent_blocked(&agent, &false);
+    assert!(!client.is_agent_blocked(&agent));
+}
+
+#[test]
+#[should_panic(expected = "Unauthorized")]
+fn test_set_agent_blocked_requires_admin_auth() {
+    let env = Env::default();
+    let contract_id = env.register_contract(None, Escrow);
+    let client = EscrowClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    env.mock_all_auths();
+    client.init(&admin);
+
+    // Drop the mocked auths so the admin require_auth is enforced.
+    env.set_auths(&[]);
+    let agent = Address::generate(&env);
+    client.set_agent_blocked(&agent, &true);
+}
+
 #[test]
 fn test_remove_service_price_clears_price() {
-// ---------------------------------------------------------------------------
-// set_service_price registration coupling (#11)
-// ---------------------------------------------------------------------------
-
-/// With strict registration off (default), pricing an unregistered service
-/// still works — backward compatible.
-#[test]
-fn test_set_price_lax_allows_unregistered_service() {
     let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
+    let (client, admin) = setup_initialized(&env);
     let svc = Symbol::new(&env, "infer");
     client.set_service_price(&svc, &500i128);
     assert_eq!(client.get_service_price(&svc), 500i128);
@@ -848,7 +1368,7 @@ fn test_set_price_lax_allows_unregistered_service() {
 #[test]
 fn test_remove_service_price_is_idempotent() {
     let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
+    let (client, admin) = setup_initialized(&env);
     let svc = Symbol::new(&env, "never_set");
     // Removing the price of a never-priced service is a no-op (no panic).
     client.remove_service_price(&svc);
@@ -858,34 +1378,21 @@ fn test_remove_service_price_is_idempotent() {
 #[test]
 fn test_remove_service_price_then_reset_works() {
     let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
+    let (client, admin) = setup_initialized(&env);
     let svc = Symbol::new(&env, "infer");
     client.set_service_price(&svc, &500i128);
     client.remove_service_price(&svc);
     assert_eq!(client.get_service_price(&svc), 0i128);
 
     // Re-setting after removal works and round-trips.
-}
-
-/// With strict registration on, pricing a registered service works.
-#[test]
-fn test_set_price_strict_allows_registered_service() {
-    let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
-    let svc = Symbol::new(&env, "infer");
-    client.set_require_service_registration(&true);
-    client.register_service(&svc);
     client.set_service_price(&svc, &750i128);
     assert_eq!(client.get_service_price(&svc), 750i128);
 }
 
 #[test]
 fn test_compute_billing_zero_after_price_removed() {
-#[test]
-#[should_panic(expected = "Error(Contract, #15)")]
-fn test_record_usage_rejects_blocked_agent() {
     let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
+    let (client, admin) = setup_initialized(&env);
     let agent = Address::generate(&env);
     let svc = Symbol::new(&env, "infer");
     client.set_service_price(&svc, &10i128);
@@ -901,37 +1408,11 @@ fn test_record_usage_rejects_blocked_agent() {
 #[test]
 fn test_remove_service_price_emits_price_rm_event() {
     let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
+    let (client, admin) = setup_initialized(&env);
     let svc = Symbol::new(&env, "infer");
     client.set_service_price(&svc, &500i128);
 
     client.remove_service_price(&svc);
-#[test]
-fn test_register_service_with_metadata_sets_flag_and_metadata() {
-    let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
-    let svc = Symbol::new(&env, "infer");
-    let owner = Address::generate(&env);
-    let description = String::from_str(&env, "GPU inference endpoint");
-
-    client.register_service_with_metadata(&svc, &description, &owner);
-
-    // A single call sets both the registration flag and the metadata.
-    assert!(client.is_service_registered(&svc));
-    let meta = client.get_service_metadata(&svc).unwrap();
-    assert_eq!(meta.description, description);
-    assert_eq!(meta.owner, owner);
-}
-
-#[test]
-fn test_register_service_with_metadata_emits_svc_reg_event() {
-    let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
-    let svc = Symbol::new(&env, "infer");
-    let owner = Address::generate(&env);
-    let description = String::from_str(&env, "GPU inference endpoint");
-
-    client.register_service_with_metadata(&svc, &description, &owner);
 
     let events = env.events().all();
     assert!(!events.is_empty());
@@ -945,44 +1426,32 @@ fn test_register_service_with_metadata_emits_svc_reg_event() {
 
 #[test]
 #[should_panic(expected = "Error(Contract, #4)")]
-fn test_register_service_rejected_while_paused() {
+fn test_remove_service_price_rejected_while_paused() {
     let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
+    let (client, admin) = setup_initialized(&env);
+    let svc = Symbol::new(&env, "infer");
+    client.set_service_price(&svc, &500i128);
     client.pause();
-    client.register_service(&Symbol::new(&env, "infer"));
+    client.remove_service_price(&svc);
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #4)")]
-fn test_set_agent_allowed_rejected_while_paused() {
+#[should_panic(expected = "Unauthorized")]
+fn test_remove_service_price_non_admin_panics() {
     let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
-    client.pause();
-    let agent = Address::generate(&env);
-    client.set_agent_allowed(&agent, &true);
+    let (client, admin) = setup_initialized(&env);
+    let svc = Symbol::new(&env, "infer");
+    client.set_service_price(&svc, &500i128);
+    // Drop the mocked auths so the admin's require_auth() is unsatisfied,
+    // simulating a caller without the admin signature.
+    env.set_auths(&[]);
+    client.remove_service_price(&svc);
 }
-
-#[test]
-#[should_panic(expected = "Error(Contract, #4)")]
-fn test_set_service_metadata_rejected_while_paused() {
-    let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
-    client.pause();
-    let owner = Address::generate(&env);
-    client.set_service_metadata(
-        &Symbol::new(&env, "infer"),
-        &String::from_str(&env, "desc"),
-        &owner,
-// ---------------------------------------------------------------------------
-// Issue #17 — per-call request floor/ceiling coverage for `record_usage`.
-// Covers the default sentinels (max = u32::MAX, min = 0), exact-bound
-// acceptance, and the over-max (#8) / under-min (#9) rejection paths.
-// ---------------------------------------------------------------------------
 
 #[test]
 fn test_i17_per_call_bounds_default_to_unbounded() {
     let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
+    let (client, admin) = setup_initialized(&env);
     // No cap and no floor configured by default.
     assert_eq!(client.get_max_requests_per_call(), u32::MAX);
     assert_eq!(client.get_min_requests_per_call(), 0);
@@ -996,324 +1465,9 @@ fn test_i17_per_call_bounds_default_to_unbounded() {
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #4)")]
-fn test_clear_service_metadata_rejected_while_paused() {
-    let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
-    client.pause();
-    client.clear_service_metadata(&Symbol::new(&env, "infer"));
-}
-
-#[test]
-#[should_panic(expected = "Error(Contract, #4)")]
-fn test_set_max_requests_per_call_rejected_while_paused() {
-    let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
-    client.pause();
-    client.set_max_requests_per_call(&10u32);
-}
-
-#[test]
-fn test_unpause_works_while_paused() {
-    let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
-    client.pause();
-    assert!(client.is_paused());
-    // Lifecycle control must remain callable during an incident.
-    client.unpause();
-    assert!(!client.is_paused());
-}
-
-#[test]
-fn test_getter_works_while_paused() {
-fn test_remove_service_price_rejected_while_paused() {
-    let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
-    let svc = Symbol::new(&env, "infer");
-    client.set_service_price(&svc, &500i128);
-    client.pause();
-    // Read getters must remain callable while paused.
-    assert_eq!(client.get_service_price(&svc), 500i128);
-// ---- record_usage validation-chain error precedence -------------------
-// These assert that the fixed error ordering
-//   Paused(#4) -> ZeroRequests(#2) -> Max(#8) -> Min(#9)
-//   -> Registration(#7) -> Disabled(#12) -> Allowlist(#10)
-// is preserved after the read-ordering refactor, and that each gate still
-// fires on its own trigger.
-
-#[test]
-#[should_panic(expected = "Error(Contract, #4)")]
-fn test_record_usage_paused_beats_zero_requests() {
-    // Paused (#4) must win even when requests == 0 (which would be #2).
-    let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
-    client.pause();
-    let agent = Address::generate(&env);
-    let service_id = Symbol::new(&env, "weather_api");
-    client.record_usage(&agent, &service_id, &0u32);
-}
-
-#[test]
-#[should_panic(expected = "Error(Contract, #2)")]
-fn test_record_usage_zero_requests_beats_max() {
-    // Zero-requests (#2) must win over the max cap (#8): with max=5 and
-    // requests=0, the zero check fires first.
-    let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
-    client.set_max_requests_per_call(&5u32);
-    let agent = Address::generate(&env);
-    let service_id = Symbol::new(&env, "weather_api");
-    client.record_usage(&agent, &service_id, &0u32);
-}
-
-#[test]
-#[should_panic(expected = "Error(Contract, #8)")]
-fn test_record_usage_max_beats_min() {
-    // Max (#8) must win over min (#9): with max=5 and min=10 (an
-    // inconsistent config), a request above max trips #8 first.
-    let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
-    client.set_max_requests_per_call(&5u32);
-    client.set_min_requests_per_call(&10u32);
-    let agent = Address::generate(&env);
-    let service_id = Symbol::new(&env, "weather_api");
-    client.record_usage(&agent, &service_id, &6u32);
-}
-
-#[test]
-#[should_panic(expected = "Error(Contract, #9)")]
-fn test_record_usage_min_beats_registration() {
-    // Min (#9) must win over the registration gate (#7): with min=10 and
-    // strict registration required (service unregistered), a below-min
-    // request trips #9 before #7.
-    let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
-    client.set_min_requests_per_call(&10u32);
-    client.set_require_service_registration(&true);
-    let agent = Address::generate(&env);
-    let service_id = Symbol::new(&env, "weather_api");
-    client.record_usage(&agent, &service_id, &3u32);
-// ---------------------------------------------------------------------------
-// Issue #18 — strict service-registration (#7) and service-disabled (#12)
-// gates in `record_usage`, plus the registry/disabled accessor round-trips.
-// ---------------------------------------------------------------------------
-
-#[test]
-fn test_i18_strict_off_allows_unknown_service() {
-    let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
-    // Default: strict registration is off, so unknown services are accepted.
-    assert!(!client.is_service_registration_required());
-    let agent = Address::generate(&env);
-    let svc = Symbol::new(&env, "unknown");
-    assert_eq!(client.record_usage(&agent, &svc, &1u32).requests, 1);
-}
-
-#[test]
-#[should_panic(expected = "Error(Contract, #7)")]
-fn test_record_usage_registration_beats_disabled() {
-    // Registration (#7) must win over disabled (#12): require registration,
-    // leave the service unregistered, and also disable it. #7 fires first.
-    let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
-    client.set_require_service_registration(&true);
-    let service_id = Symbol::new(&env, "weather_api");
-    client.set_service_disabled(&service_id, &true);
-    let agent = Address::generate(&env);
-    client.record_usage(&agent, &service_id, &5u32);
-}
-
-#[test]
-#[should_panic(expected = "Error(Contract, #12)")]
-fn test_record_usage_disabled_beats_allowlist() {
-    // Disabled (#12) must win over the allowlist (#10): disable a registered
-    // service and enable a (non-matching) allowlist. #12 fires first.
-    let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
-    let service_id = Symbol::new(&env, "weather_api");
-    client.register_service(&service_id);
-    client.set_service_disabled(&service_id, &true);
-    client.set_allowlist_enabled(&true);
-    let agent = Address::generate(&env);
-    client.record_usage(&agent, &service_id, &5u32);
-}
-
-#[test]
-#[should_panic(expected = "Error(Contract, #10)")]
-fn test_record_usage_allowlist_fires_when_enabled_and_not_allowed() {
-    // Allowlist (#10) fires when enabled and the agent is not allowed.
-    let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
-    client.set_allowlist_enabled(&true);
-    let agent = Address::generate(&env);
-    let service_id = Symbol::new(&env, "weather_api");
-    client.record_usage(&agent, &service_id, &5u32);
-fn test_i18_strict_on_rejects_unregistered() {
-    let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
-    client.set_require_service_registration(&true);
-    assert!(client.is_service_registration_required());
-    let agent = Address::generate(&env);
-    client.record_usage(&agent, &Symbol::new(&env, "ghost"), &1u32);
-}
-
-#[test]
-fn test_i18_register_admits_service_under_strict_mode() {
-    let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
-    client.set_require_service_registration(&true);
-    let agent = Address::generate(&env);
-    let svc = Symbol::new(&env, "infer");
-    client.register_service(&svc);
-    assert!(client.is_service_registered(&svc));
-    assert_eq!(client.record_usage(&agent, &svc, &2u32).requests, 2);
-}
-
-#[test]
-#[should_panic(expected = "Error(Contract, #7)")]
-fn test_record_usage_registration_fires_when_required_and_unregistered() {
-    // Registration (#7) fires when required and the service is unregistered.
-fn test_i18_unregister_reinstates_rejection() {
-    let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
-    client.set_require_service_registration(&true);
-    let agent = Address::generate(&env);
-    let service_id = Symbol::new(&env, "weather_api");
-    client.record_usage(&agent, &service_id, &5u32);
-    let svc = Symbol::new(&env, "infer");
-    client.register_service(&svc);
-    client.unregister_service(&svc);
-    assert!(!client.is_service_registered(&svc));
-
-    client.set_agent_blocked(&agent, &true);
-    client.record_usage(&agent, &svc, &1u32);
-}
-
-#[test]
-#[should_panic(expected = "Error(Contract, #12)")]
-fn test_record_usage_disabled_fires_when_service_disabled() {
-    // Disabled (#12) fires when the service is disabled.
-    let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
-    let service_id = Symbol::new(&env, "weather_api");
-    client.set_service_disabled(&service_id, &true);
-    let agent = Address::generate(&env);
-    client.record_usage(&agent, &service_id, &5u32);
-}
-
-#[test]
-#[should_panic(expected = "Error(Contract, #8)")]
-fn test_record_usage_max_fires_above_cap() {
-    // Max (#8) fires when requests exceed the configured cap.
-    let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
-    client.set_max_requests_per_call(&5u32);
-    let agent = Address::generate(&env);
-    let service_id = Symbol::new(&env, "weather_api");
-    client.record_usage(&agent, &service_id, &6u32);
-}
-
-#[test]
-#[should_panic(expected = "Error(Contract, #9)")]
-fn test_record_usage_min_fires_below_floor() {
-    // Min (#9) fires when requests fall below the configured floor.
-    let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
-    client.set_min_requests_per_call(&10u32);
-    let agent = Address::generate(&env);
-    let service_id = Symbol::new(&env, "weather_api");
-    client.record_usage(&agent, &service_id, &3u32);
-}
-
-#[test]
-fn test_record_usage_passes_all_gates_when_satisfied() {
-    // Sanity: with every gate enabled and satisfied, record_usage succeeds.
-    let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
-    let service_id = Symbol::new(&env, "weather_api");
-    let agent = Address::generate(&env);
-    client.set_max_requests_per_call(&100u32);
-    client.set_min_requests_per_call(&1u32);
-    client.set_require_service_registration(&true);
-    client.register_service(&service_id);
-    client.set_allowlist_enabled(&true);
-    client.set_agent_allowed(&agent, &true);
-
-    let record = client.record_usage(&agent, &service_id, &5u32);
-    assert_eq!(record.requests, 5);
-    client.remove_service_price(&svc);
-#[should_panic(expected = "Error(Contract, #15)")]
-fn test_blocklist_takes_precedence_over_allowlist() {
-    let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
-    let agent = Address::generate(&env);
-    let svc = Symbol::new(&env, "infer");
-
-    // Enable the allowlist and explicitly allow the agent...
-    client.set_allowlist_enabled(&true);
-    client.set_agent_allowed(&agent, &true);
-    // ...but also block it: the block must win.
-    client.set_agent_blocked(&agent, &true);
-    client.record_usage(&agent, &svc, &1u32);
-}
-
-#[test]
-#[should_panic(expected = "Error(Contract, #15)")]
-fn test_blocked_agent_rejected_while_allowlist_disabled() {
-    let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
-    let agent = Address::generate(&env);
-    let svc = Symbol::new(&env, "infer");
-
-    // Allowlist stays disabled (its default); the block alone rejects.
-    assert!(!client.is_allowlist_enabled());
-    client.set_agent_blocked(&agent, &true);
-    client.record_usage(&agent, &svc, &1u32);
-}
-
-#[test]
-fn test_unblock_then_record_succeeds() {
-    let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
-    let agent = Address::generate(&env);
-    let svc = Symbol::new(&env, "infer");
-
-    client.set_agent_blocked(&agent, &true);
-    client.set_agent_blocked(&agent, &false);
-
-    let record = client.record_usage(&agent, &svc, &5u32);
-    assert_eq!(record.requests, 5);
-    assert_eq!(client.get_usage(&agent, &svc), 5);
-}
-
-#[test]
-fn test_is_agent_blocked_round_trip() {
-    let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
-    let agent = Address::generate(&env);
-
-    // Defaults to false when never set.
-    assert!(!client.is_agent_blocked(&agent));
-    client.set_agent_blocked(&agent, &true);
-    assert!(client.is_agent_blocked(&agent));
-    client.set_agent_blocked(&agent, &false);
-    assert!(!client.is_agent_blocked(&agent));
-}
-
-#[test]
-#[should_panic(expected = "Unauthorized")]
-fn test_remove_service_price_non_admin_panics() {
-    let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
-    let svc = Symbol::new(&env, "infer");
-    client.set_service_price(&svc, &500i128);
-    // Drop the mocked auths so the admin's require_auth() is unsatisfied,
-    // simulating a caller without the admin signature.
-    env.set_auths(&[]);
-    client.remove_service_price(&svc);
 fn test_i17_record_usage_accepts_value_exactly_at_max() {
     let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
+    let (client, admin) = setup_initialized(&env);
     client.set_max_requests_per_call(&100u32);
     assert_eq!(client.get_max_requests_per_call(), 100);
     let agent = Address::generate(&env);
@@ -1326,7 +1480,7 @@ fn test_i17_record_usage_accepts_value_exactly_at_max() {
 #[should_panic(expected = "Error(Contract, #8)")]
 fn test_i17_record_usage_rejects_above_max() {
     let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
+    let (client, admin) = setup_initialized(&env);
     client.set_max_requests_per_call(&100u32);
     let agent = Address::generate(&env);
     client.record_usage(&agent, &Symbol::new(&env, "infer"), &101u32);
@@ -1335,7 +1489,7 @@ fn test_i17_record_usage_rejects_above_max() {
 #[test]
 fn test_i17_record_usage_accepts_value_exactly_at_min() {
     let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
+    let (client, admin) = setup_initialized(&env);
     client.set_min_requests_per_call(&10u32);
     assert_eq!(client.get_min_requests_per_call(), 10);
     let agent = Address::generate(&env);
@@ -1348,22 +1502,65 @@ fn test_i17_record_usage_accepts_value_exactly_at_min() {
 #[should_panic(expected = "Error(Contract, #9)")]
 fn test_i17_record_usage_rejects_below_min() {
     let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
+    let (client, admin) = setup_initialized(&env);
     client.set_min_requests_per_call(&10u32);
     let agent = Address::generate(&env);
     client.record_usage(&agent, &Symbol::new(&env, "infer"), &9u32);
-fn test_i18_disabled_service_rejects_usage() {
-// ---------------------------------------------------------------------------
-// Issue #21 — saturating arithmetic in usage counters and billing math.
-// Drives the per-pair counter, the cross-service lifetime counter, and the
-// billing multiplication to their saturation boundaries instead of letting
-// them wrap or panic.
-// ---------------------------------------------------------------------------
+}
 
 #[test]
-fn test_i21_per_pair_usage_saturates_at_u32_max() {
+fn test_i18_strict_off_allows_unknown_service() {
     let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
+    let (client, admin) = setup_initialized(&env);
+    // Default: strict registration is off, so unknown services are accepted.
+    assert!(!client.is_service_registration_required());
+    let agent = Address::generate(&env);
+    let svc = Symbol::new(&env, "unknown");
+    assert_eq!(client.record_usage(&agent, &svc, &1u32).requests, 1);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #7)")]
+fn test_i18_strict_on_rejects_unregistered() {
+    let env = Env::default();
+    let (client, admin) = setup_initialized(&env);
+    client.set_require_service_registration(&true);
+    assert!(client.is_service_registration_required());
+    let agent = Address::generate(&env);
+    client.record_usage(&agent, &Symbol::new(&env, "ghost"), &1u32);
+}
+
+#[test]
+fn test_i18_register_admits_service_under_strict_mode() {
+    let env = Env::default();
+    let (client, admin) = setup_initialized(&env);
+    client.set_require_service_registration(&true);
+    let agent = Address::generate(&env);
+    let svc = Symbol::new(&env, "infer");
+    client.register_service(&svc);
+    assert!(client.is_service_registered(&svc));
+    assert_eq!(client.record_usage(&agent, &svc, &2u32).requests, 2);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #7)")]
+fn test_i18_unregister_reinstates_rejection() {
+    let env = Env::default();
+    let (client, admin) = setup_initialized(&env);
+    client.set_require_service_registration(&true);
+    let agent = Address::generate(&env);
+    let svc = Symbol::new(&env, "infer");
+    client.register_service(&svc);
+    client.unregister_service(&svc);
+    assert!(!client.is_service_registered(&svc));
+    client.record_usage(&agent, &svc, &1u32);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #12)")]
+fn test_i18_disabled_service_rejects_usage() {
+    let env = Env::default();
+    let (client, admin) = setup_initialized(&env);
     let agent = Address::generate(&env);
     let svc = Symbol::new(&env, "infer");
     client.set_service_disabled(&svc, &true);
@@ -1374,7 +1571,7 @@ fn test_i21_per_pair_usage_saturates_at_u32_max() {
 #[test]
 fn test_i18_reenable_service_resumes_usage() {
     let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
+    let (client, admin) = setup_initialized(&env);
     let agent = Address::generate(&env);
     let svc = Symbol::new(&env, "infer");
     // Disabling then re-enabling restores the ability to accrue usage and
@@ -1385,25 +1582,12 @@ fn test_i18_reenable_service_resumes_usage() {
     assert!(!client.is_service_disabled(&svc));
     assert!(client.is_service_registered(&svc));
     assert_eq!(client.record_usage(&agent, &svc, &3u32).requests, 3);
-// ---------------------------------------------------------------------------
-// Issue #19 — lifetime usage counters and last-settlement timestamps.
-// Locks down the invariant that `settle` drains the per-pair counter but
-// never resets the lifetime analytics counters, and that LastSettlement
-// distinguishes "never settled" (None) from a genesis settle (Some(0)).
-// ---------------------------------------------------------------------------
-
-#[test]
-fn test_i19_total_usage_by_agent_accumulates_across_services() {
-    client.record_usage(&agent, &svc, &u32::MAX);
-    // Adding more saturates at u32::MAX rather than overflowing.
-    assert_eq!(client.record_usage(&agent, &svc, &10u32).requests, u32::MAX);
-    assert_eq!(client.get_usage(&agent, &svc), u32::MAX);
 }
 
 #[test]
-fn test_i21_total_usage_by_agent_saturates() {
+fn test_i19_total_usage_by_agent_accumulates_across_services() {
     let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
+    let (client, admin) = setup_initialized(&env);
     let agent = Address::generate(&env);
     let a = Symbol::new(&env, "svc_a");
     let b = Symbol::new(&env, "svc_b");
@@ -1415,42 +1599,8 @@ fn test_i21_total_usage_by_agent_saturates() {
 
 #[test]
 fn test_i19_total_requests_all_time_sums_across_agents() {
-    client.record_usage(&agent, &a, &u32::MAX);
-    client.record_usage(&agent, &b, &u32::MAX);
-    // The cross-service lifetime counter also saturates at u32::MAX.
-    assert_eq!(client.get_total_usage_by_agent(&agent), u32::MAX);
-}
-
-#[test]
-fn test_i21_compute_billing_saturates_at_i128_max() {
     let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
-    let agent = Address::generate(&env);
-    let svc = Symbol::new(&env, "infer");
-    client.set_service_price(&svc, &i128::MAX);
-    client.record_usage(&agent, &svc, &2u32);
-    // 2 * i128::MAX saturates to i128::MAX rather than overflowing.
-    assert_eq!(client.compute_billing(&agent, &svc), i128::MAX);
-}
-
-#[test]
-fn test_i21_settle_returns_saturated_value_and_drains() {
-    let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
-    let agent = Address::generate(&env);
-    let svc = Symbol::new(&env, "infer");
-    client.set_service_price(&svc, &i128::MAX);
-    client.record_usage(&agent, &svc, &5u32);
-    let billed = client.settle(&agent, &svc);
-    assert_eq!(billed, i128::MAX);
-    // The counter still drains to zero even when billing saturated.
-    assert_eq!(client.get_usage(&agent, &svc), 0);
-}
-
-#[test]
-fn test_i21_total_requests_all_time_accumulates_large_values() {
-    let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
+    let (client, admin) = setup_initialized(&env);
     let a1 = Address::generate(&env);
     let a2 = Address::generate(&env);
     let svc = Symbol::new(&env, "infer");
@@ -1462,12 +1612,12 @@ fn test_i21_total_requests_all_time_accumulates_large_values() {
 #[test]
 fn test_i19_lifetime_counters_survive_settle() {
     let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
+    let (client, admin) = setup_initialized(&env);
     let agent = Address::generate(&env);
     let svc = Symbol::new(&env, "infer");
     client.set_service_price(&svc, &2i128);
     client.record_usage(&agent, &svc, &9u32);
-    client.settle(&agent, &svc);
+    client.settle(&admin, &agent, &svc);
     // Per-pair usage drains, lifetime analytics persist.
     assert_eq!(client.get_usage(&agent, &svc), 0);
     assert_eq!(client.get_total_usage_by_agent(&agent), 9);
@@ -1482,35 +1632,31 @@ fn test_i19_last_settlement_none_before_some_after() {
     let env = Env::default();
     let ts: u64 = 777;
     env.ledger().with_mut(|li| li.timestamp = ts);
-    let (client, _admin) = setup_initialized(&env);
+    let (client, admin) = setup_initialized(&env);
     let agent = Address::generate(&env);
     let svc = Symbol::new(&env, "infer");
     client.set_service_price(&svc, &1i128);
     client.record_usage(&agent, &svc, &3u32);
     // Never-settled reads as None (distinct from Some(0)).
     assert_eq!(client.get_last_settlement(&agent, &svc), None);
-    client.settle(&agent, &svc);
+    client.settle(&admin, &agent, &svc);
     assert_eq!(client.get_last_settlement(&agent, &svc), Some(ts));
 }
 
 #[test]
 fn test_i19_last_settlement_is_none_for_never_settled_pair() {
     let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
+    let (client, admin) = setup_initialized(&env);
     let agent = Address::generate(&env);
     let svc = Symbol::new(&env, "never");
     assert_eq!(client.get_last_settlement(&agent, &svc), None);
-// ---------------------------------------------------------------------------
-// Issue #20 — two-step admin handover edge cases and the migration version
-// guard. Covers cancel-then-accept (#5), wrong-caller accept (#6), re-propose
-// overwrite, post-rotation admin authority, and the double-migrate guard (#11).
-// ---------------------------------------------------------------------------
+}
 
 #[test]
 #[should_panic(expected = "Error(Contract, #5)")]
 fn test_i20_cancel_then_accept_fails() {
     let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
+    let (client, admin) = setup_initialized(&env);
     let next = Address::generate(&env);
     client.propose_admin_transfer(&next);
     client.cancel_admin_transfer();
@@ -1522,7 +1668,7 @@ fn test_i20_cancel_then_accept_fails() {
 #[should_panic(expected = "Error(Contract, #6)")]
 fn test_i20_wrong_caller_accept_rejected() {
     let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
+    let (client, admin) = setup_initialized(&env);
     let next = Address::generate(&env);
     let intruder = Address::generate(&env);
     client.propose_admin_transfer(&next);
@@ -1533,7 +1679,7 @@ fn test_i20_wrong_caller_accept_rejected() {
 #[test]
 fn test_i20_repropose_overwrites_pending() {
     let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
+    let (client, admin) = setup_initialized(&env);
     let first = Address::generate(&env);
     let second = Address::generate(&env);
     client.propose_admin_transfer(&first);
@@ -1548,7 +1694,7 @@ fn test_i20_repropose_overwrites_pending() {
 #[test]
 fn test_i20_rotated_admin_can_act_after_handover() {
     let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
+    let (client, admin) = setup_initialized(&env);
     let next = Address::generate(&env);
     client.propose_admin_transfer(&next);
     client.accept_admin_transfer(&next);
@@ -1560,7 +1706,7 @@ fn test_i20_rotated_admin_can_act_after_handover() {
 #[test]
 fn test_i20_schema_version_is_two_after_init() {
     let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
+    let (client, admin) = setup_initialized(&env);
     // Fresh v2 init stamps SchemaVersion = 2 directly (no migration needed).
     assert_eq!(client.get_schema_version(), 2);
 }
@@ -1569,225 +1715,74 @@ fn test_i20_schema_version_is_two_after_init() {
 #[should_panic(expected = "Error(Contract, #11)")]
 fn test_i20_double_migrate_guard_rejects_on_v2() {
     let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
+    let (client, admin) = setup_initialized(&env);
     // Already at v2, so the v1->v2 migration refuses with #11.
     client.migrate_v1_to_v2();
+}
+
+#[test]
+fn test_i21_per_pair_usage_saturates_at_u32_max() {
+    let env = Env::default();
+    let (client, admin) = setup_initialized(&env);
+    let agent = Address::generate(&env);
+    let svc = Symbol::new(&env, "infer");
+    client.record_usage(&agent, &svc, &u32::MAX);
+    // Adding more saturates at u32::MAX rather than overflowing.
+    assert_eq!(client.record_usage(&agent, &svc, &10u32).requests, u32::MAX);
+    assert_eq!(client.get_usage(&agent, &svc), u32::MAX);
+}
+
+#[test]
+fn test_i21_total_usage_by_agent_saturates() {
+    let env = Env::default();
+    let (client, admin) = setup_initialized(&env);
+    let agent = Address::generate(&env);
+    let a = Symbol::new(&env, "svc_a");
+    let b = Symbol::new(&env, "svc_b");
+    client.record_usage(&agent, &a, &u32::MAX);
+    client.record_usage(&agent, &b, &u32::MAX);
+    // The cross-service lifetime counter also saturates at u32::MAX.
+    assert_eq!(client.get_total_usage_by_agent(&agent), u32::MAX);
+}
+
+#[test]
+fn test_i21_compute_billing_saturates_at_i128_max() {
+    let env = Env::default();
+    let (client, admin) = setup_initialized(&env);
+    let agent = Address::generate(&env);
+    let svc = Symbol::new(&env, "infer");
+    client.set_service_price(&svc, &i128::MAX);
+    client.record_usage(&agent, &svc, &2u32);
+    // 2 * i128::MAX saturates to i128::MAX rather than overflowing.
+    assert_eq!(client.compute_billing(&agent, &svc), i128::MAX);
+}
+
+#[test]
+fn test_i21_settle_returns_saturated_value_and_drains() {
+    let env = Env::default();
+    let (client, admin) = setup_initialized(&env);
+    let agent = Address::generate(&env);
+    let svc = Symbol::new(&env, "infer");
+    client.set_service_price(&svc, &i128::MAX);
+    client.record_usage(&agent, &svc, &5u32);
+    let billed = client.settle(&admin, &agent, &svc);
+    assert_eq!(billed, i128::MAX);
+    // The counter still drains to zero even when billing saturated.
+    assert_eq!(client.get_usage(&agent, &svc), 0);
+}
+
+#[test]
+fn test_i21_total_requests_all_time_accumulates_large_values() {
+    let env = Env::default();
+    let (client, admin) = setup_initialized(&env);
+    let a1 = Address::generate(&env);
+    let a2 = Address::generate(&env);
+    let svc = Symbol::new(&env, "infer");
     // u64 protocol counter comfortably sums two u32::MAX increments.
     client.record_usage(&a1, &svc, &u32::MAX);
     client.record_usage(&a2, &svc, &u32::MAX);
     assert_eq!(client.get_total_requests_all_time(), (u32::MAX as u64) * 2);
-// ---------------------------------------------------------------------------
-// Agent allowlist enforcement (#16)
-//
-// These tests cover the `record_usage` allowlist gate end to end: the gate is
-// off by default (any agent allowed), on + unlisted → AgentNotAllowed (#10),
-// on + listed → succeeds, and revocation re-blocks. They also exercise the
-// `is_allowlist_enabled` / `is_agent_allowed` round-trips, toggling the gate
-// while usage already exists, and multiple agents with mixed status.
-// ---------------------------------------------------------------------------
-
-/// With the allowlist disabled (the default), any agent can record usage.
-#[test]
-fn test_allowlist_disabled_allows_any_agent() {
-    let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
-    assert!(!client.is_allowlist_enabled());
-
-    let agent = Address::generate(&env);
-    let service_id = Symbol::new(&env, "weather_api");
-    let record = client.record_usage(&agent, &service_id, &5u32);
-    assert_eq!(record.requests, 5);
 }
-
-/// With the allowlist enabled and the agent not listed, record_usage panics
-/// with AgentNotAllowed (#10).
-#[test]
-#[should_panic(expected = "Error(Contract, #10)")]
-fn test_allowlist_enabled_rejects_unlisted_agent() {
-    let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
-    client.set_allowlist_enabled(&true);
-
-    let agent = Address::generate(&env);
-    let service_id = Symbol::new(&env, "weather_api");
-    client.record_usage(&agent, &service_id, &1u32);
-}
-
-/// With the allowlist enabled and the agent explicitly allowed, record_usage
-/// succeeds.
-#[test]
-fn test_allowlist_enabled_allows_listed_agent() {
-    let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
-    client.set_allowlist_enabled(&true);
-
-    let agent = Address::generate(&env);
-    client.set_agent_allowed(&agent, &true);
-    assert!(client.is_agent_allowed(&agent));
-
-    let service_id = Symbol::new(&env, "weather_api");
-    let record = client.record_usage(&agent, &service_id, &3u32);
-    assert_eq!(record.requests, 3);
-}
-
-/// An agent allowed then revoked is rejected again with #10.
-#[test]
-#[should_panic(expected = "Error(Contract, #10)")]
-fn test_allowlist_revocation_reblocks_agent() {
-    let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
-    client.set_allowlist_enabled(&true);
-
-    let agent = Address::generate(&env);
-    let service_id = Symbol::new(&env, "weather_api");
-    client.set_agent_allowed(&agent, &true);
-    client.record_usage(&agent, &service_id, &2u32);
-
-    // Revoke and try again — must be rejected.
-    client.set_agent_allowed(&agent, &false);
-    assert!(!client.is_agent_allowed(&agent));
-    client.record_usage(&agent, &service_id, &1u32);
-}
-
-/// Disabling the gate after enabling it restores access for any agent.
-#[test]
-fn test_allowlist_disable_restores_access() {
-    let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
-    let agent = Address::generate(&env);
-    let service_id = Symbol::new(&env, "weather_api");
-
-    client.set_allowlist_enabled(&true);
-    // Gate on, agent unlisted → blocked (try_ to avoid unwinding the test).
-    assert!(client.try_record_usage(&agent, &service_id, &1u32).is_err());
-
-    // Turn the gate back off; the unlisted agent can record again.
-    client.set_allowlist_enabled(&false);
-    let record = client.record_usage(&agent, &service_id, &7u32);
-    assert_eq!(record.requests, 7);
-}
-
-/// is_allowlist_enabled / is_agent_allowed round-trip cleanly.
-#[test]
-fn test_allowlist_status_round_trips() {
-    let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
-
-    assert!(!client.is_allowlist_enabled());
-    client.set_allowlist_enabled(&true);
-    assert!(client.is_allowlist_enabled());
-
-    let agent = Address::generate(&env);
-    assert!(!client.is_agent_allowed(&agent));
-    client.set_agent_allowed(&agent, &true);
-    assert!(client.is_agent_allowed(&agent));
-    client.set_agent_allowed(&agent, &false);
-    assert!(!client.is_agent_allowed(&agent));
-}
-
-/// With the gate on, multiple agents of mixed status are handled independently:
-/// the allowed one records, the unlisted one is blocked.
-#[test]
-fn test_allowlist_mixed_agents() {
-    let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
-    let service_id = Symbol::new(&env, "weather_api");
-
-    let allowed = Address::generate(&env);
-    let blocked = Address::generate(&env);
-    client.set_allowlist_enabled(&true);
-    client.set_agent_allowed(&allowed, &true);
-
-    let record = client.record_usage(&allowed, &service_id, &4u32);
-    assert_eq!(record.requests, 4);
-    assert!(client
-        .try_record_usage(&blocked, &service_id, &1u32)
-        .is_err());
-/// With strict registration on, pricing an unregistered service is rejected
-/// with ServiceNotRegistered (#7).
-#[test]
-#[should_panic(expected = "Error(Contract, #7)")]
-fn test_set_price_strict_rejects_unregistered_service() {
-    let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
-    let svc = Symbol::new(&env, "phantom");
-    client.set_require_service_registration(&true);
-    client.set_service_price(&svc, &100i128);
-}
-
-/// Pricing a disabled service is rejected with ServiceDisabled (#12),
-/// regardless of the strict-registration flag.
-#[test]
-#[should_panic(expected = "Error(Contract, #12)")]
-fn test_set_price_rejects_disabled_service() {
-    let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
-    let svc = Symbol::new(&env, "infer");
-    client.set_service_disabled(&svc, &true);
-    client.set_service_price(&svc, &100i128);
-}
-
-/// Toggling the flag on mid-life starts enforcing the coupling: a service
-/// priced while lax can no longer be re-priced once strict unless registered.
-#[test]
-#[should_panic(expected = "Error(Contract, #7)")]
-fn test_set_price_flag_toggled_mid_life() {
-    let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
-    let svc = Symbol::new(&env, "infer");
-    client.set_service_price(&svc, &100i128); // lax: allowed
-    client.set_require_service_registration(&true);
-    client.set_service_price(&svc, &200i128); // strict + unregistered: rejected
-        (symbol_short!("svc_reg"),).into_val(&env);
-    assert_eq!(topics, expected_topics);
-    let decoded: (Symbol, Address) = data.into_val(&env);
-    assert_eq!(decoded, (svc.clone(), owner.clone()));
-}
-
-#[test]
-fn test_register_service_with_metadata_overwrites_idempotently() {
-    let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
-    let svc = Symbol::new(&env, "infer");
-    let owner1 = Address::generate(&env);
-    let owner2 = Address::generate(&env);
-    let desc1 = String::from_str(&env, "first");
-    let desc2 = String::from_str(&env, "second");
-
-    client.register_service_with_metadata(&svc, &desc1, &owner1);
-    // Re-registering the same id overwrites the metadata and keeps it registered.
-    client.register_service_with_metadata(&svc, &desc2, &owner2);
-
-    assert!(client.is_service_registered(&svc));
-    let meta = client.get_service_metadata(&svc).unwrap();
-    assert_eq!(meta.description, desc2);
-    assert_eq!(meta.owner, owner2);
-}
-
-#[test]
-fn test_register_service_with_metadata_allows_empty_description() {
-    let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
-    let svc = Symbol::new(&env, "infer");
-    let owner = Address::generate(&env);
-    let empty = String::from_str(&env, "");
-
-    client.register_service_with_metadata(&svc, &empty, &owner);
-
-    assert!(client.is_service_registered(&svc));
-    let meta = client.get_service_metadata(&svc).unwrap();
-    assert_eq!(meta.description, empty);
-    assert_eq!(meta.owner, owner);
-// ---------------------------------------------------------------------------
-// Issue #22 — negative authorization coverage. `setup_initialized` uses
-// `mock_all_auths`, which can never prove that a *missing* signature is
-// rejected. These tests initialise with a scoped mock that authorises only
-// `init`, then invoke privileged entrypoints with no matching auth and assert
-// the call panics in `require_auth`. A positive control proves the same call
-// succeeds once the signature is supplied.
-// ---------------------------------------------------------------------------
-
-use soroban_sdk::testutils::{MockAuth, MockAuthInvoke};
 
 /// Register and `init` the contract authorising only `admin` for the `init`
 /// call. Subsequent privileged calls are intentionally left unauthorised so
@@ -1811,108 +1806,6 @@ fn setup_scoped_auth(env: &Env) -> EscrowClient<'_> {
 
 #[test]
 #[should_panic]
-fn test_register_service_with_metadata_rejects_non_admin() {
-fn test_set_agent_blocked_requires_admin_auth() {
-    let env = Env::default();
-    let contract_id = env.register_contract(None, Escrow);
-    let client = EscrowClient::new(&env, &contract_id);
-    let admin = Address::generate(&env);
-    env.mock_all_auths();
-    client.init(&admin);
-
-    // Clear all authorizations so the admin.require_auth() inside the
-    // entrypoint has nothing to satisfy it and the call is rejected.
-    let svc = Symbol::new(&env, "infer");
-    let owner = Address::generate(&env);
-    let description = String::from_str(&env, "GPU inference endpoint");
-    env.set_auths(&[]);
-    client.register_service_with_metadata(&svc, &description, &owner);
-    let known = Symbol::new(&env, "known");
-    let unknown = Symbol::new(&env, "unknown");
-
-    client.record_usage(&agent, &known, &7u32);
-
-    let mut pairs: Vec<(Address, Symbol)> = Vec::new(&env);
-    pairs.push_back((agent.clone(), unknown.clone()));
-    pairs.push_back((agent.clone(), known.clone()));
-
-    let out = client.get_usage_batch(&pairs);
-    assert_eq!(out.get(0), Some(0));
-    assert_eq!(out.get(1), Some(7));
-}
-
-#[test]
-fn test_get_usage_batch_duplicate_pairs() {
-    let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
-
-    let agent = Address::generate(&env);
-    let svc = Symbol::new(&env, "dup_svc");
-    client.record_usage(&agent, &svc, &42u32);
-
-    let mut pairs: Vec<(Address, Symbol)> = Vec::new(&env);
-    pairs.push_back((agent.clone(), svc.clone()));
-    pairs.push_back((agent.clone(), svc.clone()));
-    pairs.push_back((agent.clone(), svc.clone()));
-
-    let out = client.get_usage_batch(&pairs);
-    assert_eq!(out.len(), 3);
-    assert_eq!(out.get(0), Some(42));
-    assert_eq!(out.get(1), Some(42));
-    assert_eq!(out.get(2), Some(42));
-}
-
-#[test]
-fn test_get_usage_batch_empty_returns_empty() {
-    let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
-
-    let pairs: Vec<(Address, Symbol)> = Vec::new(&env);
-    let out = client.get_usage_batch(&pairs);
-    assert_eq!(out.len(), 0);
-}
-
-#[test]
-fn test_get_usage_batch_at_bound_succeeds() {
-    let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
-
-    let agent = Address::generate(&env);
-    let svc = Symbol::new(&env, "bound_svc");
-    client.record_usage(&agent, &svc, &5u32);
-
-    let mut pairs: Vec<(Address, Symbol)> = Vec::new(&env);
-    for _ in 0..MAX_BATCH_READ {
-        pairs.push_back((agent.clone(), svc.clone()));
-    }
-    assert_eq!(pairs.len(), MAX_BATCH_READ);
-
-    let out = client.get_usage_batch(&pairs);
-    assert_eq!(out.len(), MAX_BATCH_READ);
-    assert_eq!(out.get(0), Some(5));
-    assert_eq!(out.get(MAX_BATCH_READ - 1), Some(5));
-}
-
-#[test]
-#[should_panic(expected = "Error(Contract, #15)")]
-fn test_get_usage_batch_oversized_panics() {
-    let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
-
-    let agent = Address::generate(&env);
-    let svc = Symbol::new(&env, "over_svc");
-
-    let mut pairs: Vec<(Address, Symbol)> = Vec::new(&env);
-    for _ in 0..(MAX_BATCH_READ + 1) {
-        pairs.push_back((agent.clone(), svc.clone()));
-    }
-    assert_eq!(pairs.len(), MAX_BATCH_READ + 1);
-
-    client.get_usage_batch(&pairs);
-    // Drop the mocked auths so the admin require_auth is enforced.
-    env.set_auths(&[]);
-    let agent = Address::generate(&env);
-    client.set_agent_blocked(&agent, &true);
 fn test_i22_pause_requires_admin_auth() {
     let env = Env::default();
     let client = setup_scoped_auth(&env);
@@ -1981,16 +1874,193 @@ fn test_i22_pause_succeeds_with_admin_auth() {
     client.init(&admin);
     client.pause();
     assert!(client.is_paused());
-// ---------------------------------------------------------------------------
-// Owner-or-admin settlement authorization (#13)
-// ---------------------------------------------------------------------------
+}
+
+/// With the allowlist disabled (the default), any agent can record usage.
+#[test]
+fn test_allowlist_disabled_allows_any_agent() {
+    let env = Env::default();
+    let (client, admin) = setup_initialized(&env);
+    assert!(!client.is_allowlist_enabled());
+
+    let agent = Address::generate(&env);
+    let service_id = Symbol::new(&env, "weather_api");
+    let record = client.record_usage(&agent, &service_id, &5u32);
+    assert_eq!(record.requests, 5);
+}
+
+/// With the allowlist enabled and the agent not listed, record_usage panics
+/// with AgentNotAllowed (#10).
+#[test]
+#[should_panic(expected = "Error(Contract, #10)")]
+fn test_allowlist_enabled_rejects_unlisted_agent() {
+    let env = Env::default();
+    let (client, admin) = setup_initialized(&env);
+    client.set_allowlist_enabled(&true);
+
+    let agent = Address::generate(&env);
+    let service_id = Symbol::new(&env, "weather_api");
+    client.record_usage(&agent, &service_id, &1u32);
+}
+
+/// With the allowlist enabled and the agent explicitly allowed, record_usage
+/// succeeds.
+#[test]
+fn test_allowlist_enabled_allows_listed_agent() {
+    let env = Env::default();
+    let (client, admin) = setup_initialized(&env);
+    client.set_allowlist_enabled(&true);
+
+    let agent = Address::generate(&env);
+    client.set_agent_allowed(&agent, &true);
+    assert!(client.is_agent_allowed(&agent));
+
+    let service_id = Symbol::new(&env, "weather_api");
+    let record = client.record_usage(&agent, &service_id, &3u32);
+    assert_eq!(record.requests, 3);
+}
+
+/// An agent allowed then revoked is rejected again with #10.
+#[test]
+#[should_panic(expected = "Error(Contract, #10)")]
+fn test_allowlist_revocation_reblocks_agent() {
+    let env = Env::default();
+    let (client, admin) = setup_initialized(&env);
+    client.set_allowlist_enabled(&true);
+
+    let agent = Address::generate(&env);
+    let service_id = Symbol::new(&env, "weather_api");
+    client.set_agent_allowed(&agent, &true);
+    client.record_usage(&agent, &service_id, &2u32);
+
+    // Revoke and try again — must be rejected.
+    client.set_agent_allowed(&agent, &false);
+    assert!(!client.is_agent_allowed(&agent));
+    client.record_usage(&agent, &service_id, &1u32);
+}
+
+/// Disabling the gate after enabling it restores access for any agent.
+#[test]
+fn test_allowlist_disable_restores_access() {
+    let env = Env::default();
+    let (client, admin) = setup_initialized(&env);
+    let agent = Address::generate(&env);
+    let service_id = Symbol::new(&env, "weather_api");
+
+    client.set_allowlist_enabled(&true);
+    // Gate on, agent unlisted → blocked (try_ to avoid unwinding the test).
+    assert!(client.try_record_usage(&agent, &service_id, &1u32).is_err());
+
+    // Turn the gate back off; the unlisted agent can record again.
+    client.set_allowlist_enabled(&false);
+    let record = client.record_usage(&agent, &service_id, &7u32);
+    assert_eq!(record.requests, 7);
+}
+
+/// is_allowlist_enabled / is_agent_allowed round-trip cleanly.
+#[test]
+fn test_allowlist_status_round_trips() {
+    let env = Env::default();
+    let (client, admin) = setup_initialized(&env);
+
+    assert!(!client.is_allowlist_enabled());
+    client.set_allowlist_enabled(&true);
+    assert!(client.is_allowlist_enabled());
+
+    let agent = Address::generate(&env);
+    assert!(!client.is_agent_allowed(&agent));
+    client.set_agent_allowed(&agent, &true);
+    assert!(client.is_agent_allowed(&agent));
+    client.set_agent_allowed(&agent, &false);
+    assert!(!client.is_agent_allowed(&agent));
+}
+
+/// With the gate on, multiple agents of mixed status are handled independently:
+/// the allowed one records, the unlisted one is blocked.
+#[test]
+fn test_allowlist_mixed_agents() {
+    let env = Env::default();
+    let (client, admin) = setup_initialized(&env);
+    let service_id = Symbol::new(&env, "weather_api");
+
+    let allowed = Address::generate(&env);
+    let blocked = Address::generate(&env);
+    client.set_allowlist_enabled(&true);
+    client.set_agent_allowed(&allowed, &true);
+
+    let record = client.record_usage(&allowed, &service_id, &4u32);
+    assert_eq!(record.requests, 4);
+    assert!(client
+        .try_record_usage(&blocked, &service_id, &1u32)
+        .is_err());
+}
+
+/// With strict registration off (default), pricing an unregistered service
+/// still works — backward compatible.
+#[test]
+fn test_set_price_lax_allows_unregistered_service() {
+    let env = Env::default();
+    let (client, admin) = setup_initialized(&env);
+    let svc = Symbol::new(&env, "infer");
+    client.set_service_price(&svc, &500i128);
+    assert_eq!(client.get_service_price(&svc), 500i128);
+}
+
+/// With strict registration on, pricing a registered service works.
+#[test]
+fn test_set_price_strict_allows_registered_service() {
+    let env = Env::default();
+    let (client, admin) = setup_initialized(&env);
+    let svc = Symbol::new(&env, "infer");
+    client.set_require_service_registration(&true);
+    client.register_service(&svc);
+    client.set_service_price(&svc, &750i128);
+    assert_eq!(client.get_service_price(&svc), 750i128);
+}
+
+/// With strict registration on, pricing an unregistered service is rejected
+/// with ServiceNotRegistered (#7).
+#[test]
+#[should_panic(expected = "Error(Contract, #7)")]
+fn test_set_price_strict_rejects_unregistered_service() {
+    let env = Env::default();
+    let (client, admin) = setup_initialized(&env);
+    let svc = Symbol::new(&env, "phantom");
+    client.set_require_service_registration(&true);
+    client.set_service_price(&svc, &100i128);
+}
+
+/// Pricing a disabled service is rejected with ServiceDisabled (#12),
+/// regardless of the strict-registration flag.
+#[test]
+#[should_panic(expected = "Error(Contract, #12)")]
+fn test_set_price_rejects_disabled_service() {
+    let env = Env::default();
+    let (client, admin) = setup_initialized(&env);
+    let svc = Symbol::new(&env, "infer");
+    client.set_service_disabled(&svc, &true);
+    client.set_service_price(&svc, &100i128);
+}
+
+/// Toggling the flag on mid-life starts enforcing the coupling: a service
+/// priced while lax can no longer be re-priced once strict unless registered.
+#[test]
+#[should_panic(expected = "Error(Contract, #7)")]
+fn test_set_price_flag_toggled_mid_life() {
+    let env = Env::default();
+    let (client, admin) = setup_initialized(&env);
+    let svc = Symbol::new(&env, "infer");
+    client.set_service_price(&svc, &100i128); // lax: allowed
+    client.set_require_service_registration(&true);
+    client.set_service_price(&svc, &200i128); // strict + unregistered: rejected
+}
 
 /// The registered service owner can settle their own service without the
 /// admin key.
 #[test]
 fn test_owner_can_settle_own_service() {
     let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
+    let (client, admin) = setup_initialized(&env);
     let owner = Address::generate(&env);
     let agent = Address::generate(&env);
     let svc = Symbol::new(&env, "infer");
@@ -2027,7 +2097,7 @@ fn test_admin_can_settle_owned_service() {
 #[should_panic(expected = "Error(Contract, #6)")]
 fn test_owner_cannot_settle_other_service() {
     let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
+    let (client, admin) = setup_initialized(&env);
     let owner_a = Address::generate(&env);
     let owner_b = Address::generate(&env);
     let agent = Address::generate(&env);
@@ -2049,7 +2119,7 @@ fn test_owner_cannot_settle_other_service() {
 #[should_panic(expected = "Error(Contract, #13)")]
 fn test_nonadmin_settle_without_metadata_rejected() {
     let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
+    let (client, admin) = setup_initialized(&env);
     let stranger = Address::generate(&env);
     let agent = Address::generate(&env);
     let svc = Symbol::new(&env, "infer");
@@ -2064,23 +2134,21 @@ fn test_nonadmin_settle_without_metadata_rejected() {
 #[should_panic(expected = "Error(Contract, #4)")]
 fn test_owner_settle_rejected_while_paused() {
     let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
+    let (client, admin) = setup_initialized(&env);
     let owner = Address::generate(&env);
     let agent = Address::generate(&env);
     let svc = Symbol::new(&env, "infer");
     client.set_service_metadata(&svc, &String::from_str(&env, "inference"), &owner);
     client.pause();
     client.settle(&owner, &agent, &svc);
-// ---------------------------------------------------------------------------
-// Per-agent, per-window rate limiting (#10)
-// ---------------------------------------------------------------------------
+}
 
 /// By default the limiter is disabled (cap 0, window 0): an agent can record
 /// far more than any cap would allow.
 #[test]
 fn test_rate_limit_disabled_by_default() {
     let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
+    let (client, admin) = setup_initialized(&env);
     assert_eq!(client.get_max_requests_per_window(), 0);
     assert_eq!(client.get_rate_window_seconds(), 0);
 
@@ -2096,7 +2164,7 @@ fn test_rate_limit_disabled_by_default() {
 #[test]
 fn test_rate_limit_config_round_trips() {
     let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
+    let (client, admin) = setup_initialized(&env);
     client.set_max_requests_per_window(&10u32);
     client.set_rate_window_seconds(&60u64);
     assert_eq!(client.get_max_requests_per_window(), 10);
@@ -2110,7 +2178,7 @@ fn test_rate_limit_config_round_trips() {
 fn test_rate_limit_rejects_over_cap_in_window() {
     let env = Env::default();
     env.ledger().with_mut(|li| li.timestamp = 1_000);
-    let (client, _admin) = setup_initialized(&env);
+    let (client, admin) = setup_initialized(&env);
     client.set_max_requests_per_window(&10u32);
     client.set_rate_window_seconds(&100u64);
 
@@ -2127,7 +2195,7 @@ fn test_rate_limit_rejects_over_cap_in_window() {
 fn test_rate_limit_window_rollover_resets_count() {
     let env = Env::default();
     env.ledger().with_mut(|li| li.timestamp = 1_000);
-    let (client, _admin) = setup_initialized(&env);
+    let (client, admin) = setup_initialized(&env);
     client.set_max_requests_per_window(&10u32);
     client.set_rate_window_seconds(&100u64);
 
@@ -2147,7 +2215,7 @@ fn test_rate_limit_window_rollover_resets_count() {
 fn test_rate_limit_is_per_agent() {
     let env = Env::default();
     env.ledger().with_mut(|li| li.timestamp = 1_000);
-    let (client, _admin) = setup_initialized(&env);
+    let (client, admin) = setup_initialized(&env);
     client.set_max_requests_per_window(&5u32);
     client.set_rate_window_seconds(&100u64);
 
