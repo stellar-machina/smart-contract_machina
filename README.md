@@ -55,6 +55,10 @@ agentpay-contracts/
 | `cargo build` | Build |
 | `cargo test` | Run tests |
 
+## Documentation
+
+- [Escrow: Build, Test, and Deploy Guide](docs/escrow/build-deploy.md) — build the release WASM, run the test suite, and deploy to testnet with the Stellar/Soroban CLI.
+
 ## CI/CD
 
 On push/PR to `main`, GitHub Actions runs:
