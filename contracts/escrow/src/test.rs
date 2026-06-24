@@ -1435,4 +1435,131 @@ fn test_i20_double_migrate_guard_rejects_on_v2() {
     client.record_usage(&a1, &svc, &u32::MAX);
     client.record_usage(&a2, &svc, &u32::MAX);
     assert_eq!(client.get_total_requests_all_time(), (u32::MAX as u64) * 2);
+// ---------------------------------------------------------------------------
+// Agent allowlist enforcement (#16)
+//
+// These tests cover the `record_usage` allowlist gate end to end: the gate is
+// off by default (any agent allowed), on + unlisted → AgentNotAllowed (#10),
+// on + listed → succeeds, and revocation re-blocks. They also exercise the
+// `is_allowlist_enabled` / `is_agent_allowed` round-trips, toggling the gate
+// while usage already exists, and multiple agents with mixed status.
+// ---------------------------------------------------------------------------
+
+/// With the allowlist disabled (the default), any agent can record usage.
+#[test]
+fn test_allowlist_disabled_allows_any_agent() {
+    let env = Env::default();
+    let (client, _admin) = setup_initialized(&env);
+    assert!(!client.is_allowlist_enabled());
+
+    let agent = Address::generate(&env);
+    let service_id = Symbol::new(&env, "weather_api");
+    let record = client.record_usage(&agent, &service_id, &5u32);
+    assert_eq!(record.requests, 5);
+}
+
+/// With the allowlist enabled and the agent not listed, record_usage panics
+/// with AgentNotAllowed (#10).
+#[test]
+#[should_panic(expected = "Error(Contract, #10)")]
+fn test_allowlist_enabled_rejects_unlisted_agent() {
+    let env = Env::default();
+    let (client, _admin) = setup_initialized(&env);
+    client.set_allowlist_enabled(&true);
+
+    let agent = Address::generate(&env);
+    let service_id = Symbol::new(&env, "weather_api");
+    client.record_usage(&agent, &service_id, &1u32);
+}
+
+/// With the allowlist enabled and the agent explicitly allowed, record_usage
+/// succeeds.
+#[test]
+fn test_allowlist_enabled_allows_listed_agent() {
+    let env = Env::default();
+    let (client, _admin) = setup_initialized(&env);
+    client.set_allowlist_enabled(&true);
+
+    let agent = Address::generate(&env);
+    client.set_agent_allowed(&agent, &true);
+    assert!(client.is_agent_allowed(&agent));
+
+    let service_id = Symbol::new(&env, "weather_api");
+    let record = client.record_usage(&agent, &service_id, &3u32);
+    assert_eq!(record.requests, 3);
+}
+
+/// An agent allowed then revoked is rejected again with #10.
+#[test]
+#[should_panic(expected = "Error(Contract, #10)")]
+fn test_allowlist_revocation_reblocks_agent() {
+    let env = Env::default();
+    let (client, _admin) = setup_initialized(&env);
+    client.set_allowlist_enabled(&true);
+
+    let agent = Address::generate(&env);
+    let service_id = Symbol::new(&env, "weather_api");
+    client.set_agent_allowed(&agent, &true);
+    client.record_usage(&agent, &service_id, &2u32);
+
+    // Revoke and try again — must be rejected.
+    client.set_agent_allowed(&agent, &false);
+    assert!(!client.is_agent_allowed(&agent));
+    client.record_usage(&agent, &service_id, &1u32);
+}
+
+/// Disabling the gate after enabling it restores access for any agent.
+#[test]
+fn test_allowlist_disable_restores_access() {
+    let env = Env::default();
+    let (client, _admin) = setup_initialized(&env);
+    let agent = Address::generate(&env);
+    let service_id = Symbol::new(&env, "weather_api");
+
+    client.set_allowlist_enabled(&true);
+    // Gate on, agent unlisted → blocked (try_ to avoid unwinding the test).
+    assert!(client.try_record_usage(&agent, &service_id, &1u32).is_err());
+
+    // Turn the gate back off; the unlisted agent can record again.
+    client.set_allowlist_enabled(&false);
+    let record = client.record_usage(&agent, &service_id, &7u32);
+    assert_eq!(record.requests, 7);
+}
+
+/// is_allowlist_enabled / is_agent_allowed round-trip cleanly.
+#[test]
+fn test_allowlist_status_round_trips() {
+    let env = Env::default();
+    let (client, _admin) = setup_initialized(&env);
+
+    assert!(!client.is_allowlist_enabled());
+    client.set_allowlist_enabled(&true);
+    assert!(client.is_allowlist_enabled());
+
+    let agent = Address::generate(&env);
+    assert!(!client.is_agent_allowed(&agent));
+    client.set_agent_allowed(&agent, &true);
+    assert!(client.is_agent_allowed(&agent));
+    client.set_agent_allowed(&agent, &false);
+    assert!(!client.is_agent_allowed(&agent));
+}
+
+/// With the gate on, multiple agents of mixed status are handled independently:
+/// the allowed one records, the unlisted one is blocked.
+#[test]
+fn test_allowlist_mixed_agents() {
+    let env = Env::default();
+    let (client, _admin) = setup_initialized(&env);
+    let service_id = Symbol::new(&env, "weather_api");
+
+    let allowed = Address::generate(&env);
+    let blocked = Address::generate(&env);
+    client.set_allowlist_enabled(&true);
+    client.set_agent_allowed(&allowed, &true);
+
+    let record = client.record_usage(&allowed, &service_id, &4u32);
+    assert_eq!(record.requests, 4);
+    assert!(client
+        .try_record_usage(&blocked, &service_id, &1u32)
+        .is_err());
 }
