@@ -697,3 +697,82 @@ fn test_pause_pause_unpause_ends_unpaused() {
 
     assert!(!client.is_paused());
 }
+
+// --- Arithmetic overflow/saturation policy (see docs/escrow/arithmetic.md) ---
+
+#[test]
+fn test_per_pair_usage_saturates_at_u32_max() {
+    let env = Env::default();
+    let (client, _admin) = setup_initialized(&env);
+
+    let agent = Address::generate(&env);
+    let service_id = Symbol::new(&env, "weather_api");
+
+    // record_usage takes a u32 delta, so reach the boundary across two calls:
+    // (u32::MAX - 1) then 5 more would overflow -> must clamp at u32::MAX.
+    client.record_usage(&agent, &service_id, &(u32::MAX - 1));
+    let record = client.record_usage(&agent, &service_id, &5u32);
+
+    assert_eq!(record.requests, u32::MAX);
+    assert_eq!(client.get_usage(&agent, &service_id), u32::MAX);
+}
+
+#[test]
+fn test_total_usage_by_agent_saturates_at_u32_max() {
+    let env = Env::default();
+    let (client, _admin) = setup_initialized(&env);
+
+    let agent = Address::generate(&env);
+    // Two distinct services so the per-pair counters do not themselves clamp
+    // before the per-agent lifetime counter does.
+    let svc_a = Symbol::new(&env, "svc_a");
+    let svc_b = Symbol::new(&env, "svc_b");
+
+    client.record_usage(&agent, &svc_a, &(u32::MAX - 1));
+    client.record_usage(&agent, &svc_b, &10u32);
+
+    assert_eq!(client.get_total_usage_by_agent(&agent), u32::MAX);
+}
+
+#[test]
+fn test_compute_billing_saturates_at_i128_max() {
+    let env = Env::default();
+    let (client, admin) = setup_initialized(&env);
+    let _ = &admin;
+
+    let agent = Address::generate(&env);
+    let service_id = Symbol::new(&env, "expensive");
+
+    // Huge price; any positive usage makes requests*price overflow i128.
+    client.set_service_price(&service_id, &i128::MAX);
+    client.record_usage(&agent, &service_id, &2u32);
+
+    assert_eq!(client.compute_billing(&agent, &service_id), i128::MAX);
+}
+
+#[test]
+fn test_compute_billing_zero_price_is_zero() {
+    let env = Env::default();
+    let (client, _admin) = setup_initialized(&env);
+
+    let agent = Address::generate(&env);
+    let service_id = Symbol::new(&env, "free_api");
+
+    // Zero price (free service): any usage bills to zero.
+    client.set_service_price(&service_id, &0i128);
+    client.record_usage(&agent, &service_id, &1000u32);
+
+    assert_eq!(client.compute_billing(&agent, &service_id), 0);
+}
+
+#[test]
+fn test_settle_unused_pair_returns_zero() {
+    let env = Env::default();
+    let (client, _admin) = setup_initialized(&env);
+
+    let agent = Address::generate(&env);
+    let service_id = Symbol::new(&env, "never_used");
+
+    // No usage recorded and no price set: settle bills zero.
+    assert_eq!(client.settle(&agent, &service_id), 0);
+}

@@ -232,12 +232,14 @@ impl Escrow {
         }
         let key = DataKey::Usage(agent.clone(), service_id.clone());
         let prev: u32 = env.storage().persistent().get(&key).unwrap_or(0);
+        // saturate: settlement drains long before u32::MAX; never panic the hot path.
         let total = prev.saturating_add(requests);
         env.storage().persistent().set(&key, &total);
 
         // Cross-service lifetime counter for the agent. Saturates at u32::MAX.
         let total_key = DataKey::TotalUsageByAgent(agent.clone());
         let prev_total: u32 = env.storage().persistent().get(&total_key).unwrap_or(0);
+        // saturate: settlement drains long before u32::MAX; never panic the hot path.
         env.storage()
             .persistent()
             .set(&total_key, &prev_total.saturating_add(requests));
@@ -248,6 +250,7 @@ impl Escrow {
             .persistent()
             .get(&DataKey::TotalRequestsAllTime)
             .unwrap_or(0);
+        // u64 horizon; saturate not panic.
         env.storage().persistent().set(
             &DataKey::TotalRequestsAllTime,
             &proto_prev.saturating_add(requests as u64),
@@ -350,6 +353,8 @@ impl Escrow {
             .persistent()
             .get(&DataKey::ServicePrice(service_id))
             .unwrap_or(0);
+        // saturate: read/settle path returns a sentinel-large value rather than
+        // panicking; off-chain loop treats saturation as an error signal.
         (requests as i128).saturating_mul(price)
     }
 
@@ -377,6 +382,8 @@ impl Escrow {
             .persistent()
             .get(&DataKey::ServicePrice(service_id.clone()))
             .unwrap_or(0);
+        // saturate: read/settle path returns a sentinel-large value rather than
+        // panicking; off-chain loop treats saturation as an error signal.
         let billed = (requests as i128).saturating_mul(price);
         env.storage().persistent().set(&usage_key, &0u32);
         env.storage().persistent().set(
