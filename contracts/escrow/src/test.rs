@@ -697,3 +697,78 @@ fn test_pause_pause_unpause_ends_unpaused() {
 
     assert!(!client.is_paused());
 }
+
+// ---------------------------------------------------------------------------
+// Issue #19 — lifetime usage counters and last-settlement timestamps.
+// Locks down the invariant that `settle` drains the per-pair counter but
+// never resets the lifetime analytics counters, and that LastSettlement
+// distinguishes "never settled" (None) from a genesis settle (Some(0)).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_i19_total_usage_by_agent_accumulates_across_services() {
+    let env = Env::default();
+    let (client, _admin) = setup_initialized(&env);
+    let agent = Address::generate(&env);
+    let a = Symbol::new(&env, "svc_a");
+    let b = Symbol::new(&env, "svc_b");
+    client.record_usage(&agent, &a, &5u32);
+    client.record_usage(&agent, &b, &7u32);
+    // Cross-service lifetime counter sums both services for the agent.
+    assert_eq!(client.get_total_usage_by_agent(&agent), 12);
+}
+
+#[test]
+fn test_i19_total_requests_all_time_sums_across_agents() {
+    let env = Env::default();
+    let (client, _admin) = setup_initialized(&env);
+    let a1 = Address::generate(&env);
+    let a2 = Address::generate(&env);
+    let svc = Symbol::new(&env, "infer");
+    client.record_usage(&a1, &svc, &4u32);
+    client.record_usage(&a2, &svc, &6u32);
+    assert_eq!(client.get_total_requests_all_time(), 10u64);
+}
+
+#[test]
+fn test_i19_lifetime_counters_survive_settle() {
+    let env = Env::default();
+    let (client, _admin) = setup_initialized(&env);
+    let agent = Address::generate(&env);
+    let svc = Symbol::new(&env, "infer");
+    client.set_service_price(&svc, &2i128);
+    client.record_usage(&agent, &svc, &9u32);
+    client.settle(&agent, &svc);
+    // Per-pair usage drains, lifetime analytics persist.
+    assert_eq!(client.get_usage(&agent, &svc), 0);
+    assert_eq!(client.get_total_usage_by_agent(&agent), 9);
+    assert_eq!(client.get_total_requests_all_time(), 9u64);
+    // Re-recording after settle continues to grow the lifetime counter.
+    client.record_usage(&agent, &svc, &1u32);
+    assert_eq!(client.get_total_usage_by_agent(&agent), 10);
+}
+
+#[test]
+fn test_i19_last_settlement_none_before_some_after() {
+    let env = Env::default();
+    let ts: u64 = 777;
+    env.ledger().with_mut(|li| li.timestamp = ts);
+    let (client, _admin) = setup_initialized(&env);
+    let agent = Address::generate(&env);
+    let svc = Symbol::new(&env, "infer");
+    client.set_service_price(&svc, &1i128);
+    client.record_usage(&agent, &svc, &3u32);
+    // Never-settled reads as None (distinct from Some(0)).
+    assert_eq!(client.get_last_settlement(&agent, &svc), None);
+    client.settle(&agent, &svc);
+    assert_eq!(client.get_last_settlement(&agent, &svc), Some(ts));
+}
+
+#[test]
+fn test_i19_last_settlement_is_none_for_never_settled_pair() {
+    let env = Env::default();
+    let (client, _admin) = setup_initialized(&env);
+    let agent = Address::generate(&env);
+    let svc = Symbol::new(&env, "never");
+    assert_eq!(client.get_last_settlement(&agent, &svc), None);
+}
