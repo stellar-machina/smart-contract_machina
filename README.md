@@ -84,6 +84,7 @@ agentpay-contracts/
 ## Documentation
 
 - [Escrow: Build, Test, and Deploy Guide](docs/escrow/build-deploy.md) — build the release WASM, run the test suite, and deploy to testnet with the Stellar/Soroban CLI.
+- [Escrow: Entrypoint & Error-Code Reference](docs/escrow/api.md) — every entrypoint with its signature, auth/pause requirements, and panics, plus the full `EscrowError` catalogue.
 
 ## CI/CD
 
