@@ -89,6 +89,11 @@ pub enum DataKey {
     /// disabled without unregistering, preserving the metadata and the
     /// per-(agent, service) usage history.
     ServiceDisabled(Symbol),
+    /// Per-agent blocklist (deny list) flag. When `true`, `record_usage`
+    /// rejects the agent with `AgentBlocked`, independent of and taking
+    /// precedence over the allowlist. Absent entry defaults to `false`
+    /// (not blocked), so existing behaviour is unchanged when unused.
+    AgentBlocked(Address),
 }
 
 /// Typed contract errors. Codes are append-only to keep client SDKs stable.
@@ -134,6 +139,10 @@ pub enum EscrowError {
     InvalidAdminProposal = 14,
     /// `get_usage_batch` was called with more than `MAX_BATCH_READ` pairs.
     BatchTooLarge = 15,
+    /// `record_usage` was called by/for an agent on the per-agent
+    /// blocklist. Takes precedence over the allowlist: a blocked agent is
+    /// rejected even when it is also allow-listed.
+    AgentBlocked = 16,
 }
 
 #[contracttype]
@@ -292,6 +301,11 @@ impl Escrow {
         }
         if read_flag(&env, &DataKey::ServiceDisabled(service_id.clone())) {
             panic_with_error!(&env, EscrowError::ServiceDisabled);
+        }
+        // Per-agent blocklist takes precedence over the allowlist: a blocked
+        // agent is rejected even if also allow-listed.
+        if read_flag(&env, &DataKey::AgentBlocked(agent.clone())) {
+            panic_with_error!(&env, EscrowError::AgentBlocked);
         }
         // Conditional read: AgentAllowed is only touched when the allowlist is
         // enabled (the `&&` short-circuits otherwise).
@@ -585,6 +599,25 @@ impl Escrow {
         admin.require_auth();
         ensure_not_paused(&env);
         write_flag(&env, &DataKey::AgentAllowed(agent), allowed);
+    }
+
+    /// Read whether an agent is on the blocklist (false for never-set).
+    pub fn is_agent_blocked(env: Env, agent: Address) -> bool {
+        read_flag(&env, &DataKey::AgentBlocked(agent))
+    }
+
+    /// Admin sets the blocklist status for a specific agent. A blocked
+    /// agent is rejected by `record_usage` with `AgentBlocked`,
+    /// independent of the allowlist and taking precedence over it: an
+    /// agent that is both allow-listed and blocked is still rejected.
+    pub fn set_agent_blocked(env: Env, agent: Address, blocked: bool) {
+        let admin: Address = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Admin)
+            .unwrap_or_else(|| panic_with_error!(&env, EscrowError::NotInitialized));
+        admin.require_auth();
+        write_flag(&env, &DataKey::AgentBlocked(agent), blocked);
     }
 
     /// Admin sets the per-call lower bound on `requests` for batched
