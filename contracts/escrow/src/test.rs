@@ -26,6 +26,28 @@ use soroban_sdk::{
     testutils::{Address as _, Events, Ledger},
     Address, IntoVal, Symbol,
 };
+//! # Service metadata round-trip and slot independence
+//!
+//! The tests in the `service metadata round-trip and slot independence`
+//! section (issue #41) verify that the four per-service storage slots are
+//! mutually independent:
+//!
+//! - `ServiceMetadata(service_id)` — free-form `(description, owner)`.
+//! - `ServiceRegistered(service_id)` — strict-registration listing.
+//! - `ServiceDisabled(service_id)` — temporary disable flag.
+//! - (per-(agent, service) usage / pricing are separate slots too.)
+//!
+//! Invariants covered:
+//! - `set_service_metadata` then `get_service_metadata` round-trips the exact
+//!   `description` + `owner`; a never-set service returns `None`.
+//! - Registering a service does NOT set its disabled flag.
+//! - Disabling a service preserves `is_service_registered == true` and its
+//!   metadata.
+//! - `unregister_service` clears ONLY the registered slot — it does not touch
+//!   the disabled flag or the metadata.
+
+use super::*;
+use soroban_sdk::{testutils::Address as _, Address, String, Symbol};
 
 fn setup_initialized(env: &Env) -> (EscrowClient<'_>, Address) {
     env.mock_all_auths();
@@ -522,4 +544,118 @@ fn test_migrate_v1_to_v2_rejected_on_fresh_v2_init() {
     let env = Env::default();
     let (client, _admin) = setup_initialized(&env);
     client.migrate_v1_to_v2();
+// ---------------------------------------------------------------------------
+// service metadata round-trip and slot independence (issue #41)
+//
+// ServiceMetadata, ServiceRegistered, and ServiceDisabled are three
+// independent persistent slots keyed by service_id. These tests prove that
+// writing one never implicitly writes another, and that unregistering only
+// clears the registered slot.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_set_service_metadata_round_trips_description_and_owner() {
+    let env = Env::default();
+    let (client, _admin) = setup_initialized(&env);
+    let svc = Symbol::new(&env, "infer");
+    let owner = Address::generate(&env);
+    let description = String::from_str(&env, "GPU inference endpoint");
+
+    client.set_service_metadata(&svc, &description, &owner);
+
+    let meta = client.get_service_metadata(&svc).unwrap();
+    assert_eq!(meta.description, description);
+    assert_eq!(meta.owner, owner);
+}
+
+#[test]
+fn test_get_service_metadata_returns_none_when_never_set() {
+    let env = Env::default();
+    let (client, _admin) = setup_initialized(&env);
+    let svc = Symbol::new(&env, "never_set");
+    assert_eq!(client.get_service_metadata(&svc), None);
+}
+
+#[test]
+fn test_register_service_does_not_set_disabled_flag() {
+    let env = Env::default();
+    let (client, _admin) = setup_initialized(&env);
+    let svc = Symbol::new(&env, "infer");
+
+    client.register_service(&svc);
+
+    assert!(client.is_service_registered(&svc));
+    // Registering must not implicitly disable the service.
+    assert!(!client.is_service_disabled(&svc));
+}
+
+#[test]
+fn test_disable_preserves_registration_and_metadata() {
+    let env = Env::default();
+    let (client, _admin) = setup_initialized(&env);
+    let svc = Symbol::new(&env, "infer");
+    let owner = Address::generate(&env);
+    let description = String::from_str(&env, "GPU inference endpoint");
+
+    client.register_service(&svc);
+    client.set_service_metadata(&svc, &description, &owner);
+
+    client.set_service_disabled(&svc, &true);
+
+    // Disabling a service is orthogonal to registration and metadata.
+    assert!(client.is_service_disabled(&svc));
+    assert!(client.is_service_registered(&svc));
+    let meta = client.get_service_metadata(&svc).unwrap();
+    assert_eq!(meta.description, description);
+    assert_eq!(meta.owner, owner);
+}
+
+#[test]
+fn test_unregister_service_does_not_clear_metadata_or_disabled_flag() {
+    let env = Env::default();
+    let (client, _admin) = setup_initialized(&env);
+    let svc = Symbol::new(&env, "infer");
+    let owner = Address::generate(&env);
+    let description = String::from_str(&env, "GPU inference endpoint");
+
+    client.register_service(&svc);
+    client.set_service_metadata(&svc, &description, &owner);
+    client.set_service_disabled(&svc, &true);
+
+    client.unregister_service(&svc);
+
+    // unregister_service only removes the ServiceRegistered slot.
+    assert!(!client.is_service_registered(&svc));
+    // Metadata and the disabled flag survive an unregister.
+    assert!(client.is_service_disabled(&svc));
+    let meta = client.get_service_metadata(&svc).unwrap();
+    assert_eq!(meta.description, description);
+    assert_eq!(meta.owner, owner);
+}
+
+#[test]
+fn test_service_slot_toggle_matrix_is_independent() {
+    let env = Env::default();
+    let (client, _admin) = setup_initialized(&env);
+    let svc = Symbol::new(&env, "infer");
+
+    // Baseline: every slot reads its default for a fresh service id.
+    assert!(!client.is_service_registered(&svc));
+    assert!(!client.is_service_disabled(&svc));
+    assert_eq!(client.get_service_metadata(&svc), None);
+
+    // Toggle registered only.
+    client.register_service(&svc);
+    assert!(client.is_service_registered(&svc));
+    assert!(!client.is_service_disabled(&svc));
+
+    // Toggle disabled only; registered stays set.
+    client.set_service_disabled(&svc, &true);
+    assert!(client.is_service_registered(&svc));
+    assert!(client.is_service_disabled(&svc));
+
+    // Re-enable; registered stays set.
+    client.set_service_disabled(&svc, &false);
+    assert!(client.is_service_registered(&svc));
+    assert!(!client.is_service_disabled(&svc));
 }
