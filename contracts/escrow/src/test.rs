@@ -1308,4 +1308,76 @@ fn test_i19_last_settlement_is_none_for_never_settled_pair() {
     let agent = Address::generate(&env);
     let svc = Symbol::new(&env, "never");
     assert_eq!(client.get_last_settlement(&agent, &svc), None);
+// ---------------------------------------------------------------------------
+// Issue #20 — two-step admin handover edge cases and the migration version
+// guard. Covers cancel-then-accept (#5), wrong-caller accept (#6), re-propose
+// overwrite, post-rotation admin authority, and the double-migrate guard (#11).
+// ---------------------------------------------------------------------------
+
+#[test]
+#[should_panic(expected = "Error(Contract, #5)")]
+fn test_i20_cancel_then_accept_fails() {
+    let env = Env::default();
+    let (client, _admin) = setup_initialized(&env);
+    let next = Address::generate(&env);
+    client.propose_admin_transfer(&next);
+    client.cancel_admin_transfer();
+    // Nothing pending after a cancel, so accept must fail with #5.
+    client.accept_admin_transfer(&next);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #6)")]
+fn test_i20_wrong_caller_accept_rejected() {
+    let env = Env::default();
+    let (client, _admin) = setup_initialized(&env);
+    let next = Address::generate(&env);
+    let intruder = Address::generate(&env);
+    client.propose_admin_transfer(&next);
+    // A caller other than the pending admin is rejected with #6.
+    client.accept_admin_transfer(&intruder);
+}
+
+#[test]
+fn test_i20_repropose_overwrites_pending() {
+    let env = Env::default();
+    let (client, _admin) = setup_initialized(&env);
+    let first = Address::generate(&env);
+    let second = Address::generate(&env);
+    client.propose_admin_transfer(&first);
+    assert_eq!(client.get_pending_admin(), Some(first));
+    client.propose_admin_transfer(&second);
+    assert_eq!(client.get_pending_admin(), Some(second.clone()));
+    // Only the most recent pending admin can accept.
+    client.accept_admin_transfer(&second);
+    assert_eq!(client.get_admin(), Some(second));
+}
+
+#[test]
+fn test_i20_rotated_admin_can_act_after_handover() {
+    let env = Env::default();
+    let (client, _admin) = setup_initialized(&env);
+    let next = Address::generate(&env);
+    client.propose_admin_transfer(&next);
+    client.accept_admin_transfer(&next);
+    // The rotated admin can now perform an admin-gated action.
+    client.pause();
+    assert!(client.is_paused());
+}
+
+#[test]
+fn test_i20_schema_version_is_two_after_init() {
+    let env = Env::default();
+    let (client, _admin) = setup_initialized(&env);
+    // Fresh v2 init stamps SchemaVersion = 2 directly (no migration needed).
+    assert_eq!(client.get_schema_version(), 2);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #11)")]
+fn test_i20_double_migrate_guard_rejects_on_v2() {
+    let env = Env::default();
+    let (client, _admin) = setup_initialized(&env);
+    // Already at v2, so the v1->v2 migration refuses with #11.
+    client.migrate_v1_to_v2();
 }
