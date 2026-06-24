@@ -1,71 +1,9 @@
 #![cfg(test)]
 #![allow(deprecated)]
 
-//! # Settle / record_usage event and invariant coverage
-//!
-//! The tests at the bottom of this module (see the
-//! `settle event payload and drain-to-zero invariants` section) lock down
-//! the following invariants of the settlement path:
-//!
-//! - After `settle`, the per-(agent, service) usage counter drains to `0`.
-//! - `settle` stamps `LastSettlement` with the *current ledger timestamp*;
-//!   `get_last_settlement` then returns `Some(ts)` matching the clock set
-//!   via `env.ledger().with_mut`.
-//! - The `billed` amount returned by `settle` equals `compute_billing` for
-//!   the same pre-settle state (requests * price, in stroops).
-//! - `settle` publishes a `settled` event carrying
-//!   `(agent, service_id, requests, billed)`.
-//! - `record_usage` publishes a `usage` event carrying
-//!   `(agent, service_id, requests, total)`.
-//! - Settling a zero-usage pair returns `0`, still stamps `LastSettlement`,
-//!   and still emits a `settled` event.
-
 use super::*;
-use soroban_sdk::{testutils::Address as _, Address, String, Symbol};
 use soroban_sdk::{
     testutils::{Address as _, Events, Ledger},
-    Address, IntoVal, Symbol,
-};
-//! # Service metadata round-trip and slot independence
-//!
-//! The tests in the `service metadata round-trip and slot independence`
-//! section (issue #41) verify that the four per-service storage slots are
-//! mutually independent:
-//!
-//! - `ServiceMetadata(service_id)` — free-form `(description, owner)`.
-//! - `ServiceRegistered(service_id)` — strict-registration listing.
-//! - `ServiceDisabled(service_id)` — temporary disable flag.
-//! - (per-(agent, service) usage / pricing are separate slots too.)
-//!
-//! Invariants covered:
-//! - `set_service_metadata` then `get_service_metadata` round-trips the exact
-//!   `description` + `owner`; a never-set service returns `None`.
-//! - Registering a service does NOT set its disabled flag.
-//! - Disabling a service preserves `is_service_registered == true` and its
-//!   metadata.
-//! - `unregister_service` clears ONLY the registered slot — it does not touch
-//!   the disabled flag or the metadata.
-
-use super::*;
-use soroban_sdk::{testutils::Address as _, Address, String, Symbol};
-//! # Pause / unpause events and idempotent toggling
-//!
-//! The tests in the `pause/unpause events and idempotent toggling` section
-//! (issue #42) cover the admin-gated pause switch:
-//!
-//! - `pause()` publishes a `paused` event whose data is the bool `true`.
-//! - `unpause()` publishes a `paused` event whose data is the bool `false`.
-//! - Double-pause and double-unpause are idempotent: `is_paused` stays
-//!   consistent across repeated calls.
-//! - A `pause -> pause -> unpause` sequence ends unpaused.
-//!
-//! NOTE: `setup_initialized` calls `env.mock_all_auths()`, so the admin
-//! signature is mocked. Non-admin rejection is therefore not exercised here;
-//! these tests assert the admin/happy path and the idempotency invariants.
-
-use super::*;
-use soroban_sdk::{
-    testutils::{Address as _, Events},
     Address, IntoVal, Symbol,
 };
 
@@ -325,8 +263,10 @@ fn test_bool_flag_accessor_round_trip() {
     assert!(client.is_allowlist_enabled());
     client.set_allowlist_enabled(&false);
     assert!(!client.is_allowlist_enabled());
+}
+
+#[test]
 fn test_transfer_service_ownership_by_owner_preserves_description() {
-fn test_clear_service_metadata_removes_entry() {
     let env = Env::default();
     let (client, _admin) = setup_initialized(&env);
     let svc = Symbol::new(&env, "infer");
@@ -368,6 +308,14 @@ fn test_transfer_service_ownership_missing_metadata_panics() {
     let caller = Address::generate(&env);
     let new_owner = Address::generate(&env);
     client.transfer_service_ownership(&caller, &svc, &new_owner);
+}
+
+#[test]
+fn test_clear_service_metadata_removes_entry() {
+    let env = Env::default();
+    let (client, _admin) = setup_initialized(&env);
+    let svc = Symbol::new(&env, "infer");
+    let owner = Address::generate(&env);
     let desc = String::from_str(&env, "inference service");
     client.set_service_metadata(&svc, &desc, &owner);
     assert!(client.get_service_metadata(&svc).is_some());
@@ -400,7 +348,10 @@ fn test_clear_service_metadata_leaves_registration_untouched() {
 
     assert!(client.get_service_metadata(&svc).is_none());
     assert!(client.is_service_registered(&svc));
-#[should_panic(expected = "Error(Contract, #13)")]
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #14)")]
 fn test_propose_admin_transfer_rejects_self_target() {
     let env = Env::default();
     let (client, admin) = setup_initialized(&env);
@@ -424,14 +375,7 @@ fn test_accept_admin_transfer_clears_pending() {
     client.propose_admin_transfer(&next);
     client.accept_admin_transfer(&next);
     assert_eq!(client.get_pending_admin(), None);
-// ---------------------------------------------------------------------------
-// settle event payload and drain-to-zero invariants (issue #40)
-//
-// Locks down the settlement path: usage drains to zero, LastSettlement is
-// stamped with the ledger clock, the returned `billed` matches
-// `compute_billing`, and the `settled` / `usage` events are emitted with
-// their documented payloads.
-// ---------------------------------------------------------------------------
+}
 
 #[test]
 fn test_settle_drains_to_zero_and_stamps_last_settlement() {
@@ -508,42 +452,6 @@ fn test_record_usage_emits_usage_event_with_payload() {
     let svc = Symbol::new(&env, "weather_api");
 
     let record = client.record_usage(&agent, &svc, &25u32);
-// ---------------------------------------------------------------------------
-// pause/unpause events and idempotent toggling (issue #42)
-//
-// pause() and unpause() are admin-gated, idempotent, and each publish a
-// `paused` topic carrying a bare bool (true on pause, false on unpause).
-// Auth is mocked via env.mock_all_auths() in setup_initialized, so only the
-// admin/happy path and idempotency are exercised here.
-// ---------------------------------------------------------------------------
-
-#[test]
-fn test_pause_emits_paused_event_true() {
-    let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
-
-    client.pause();
-
-    // Read events immediately after pause(): events().all() only surfaces
-    // events from the most recent contract invocation.
-    let events = env.events().all();
-    assert!(!events.is_empty());
-    let (_addr, topics, data) = events.last().unwrap();
-    let expected_topics: soroban_sdk::Vec<soroban_sdk::Val> =
-        (symbol_short!("paused"),).into_val(&env);
-    assert_eq!(topics, expected_topics);
-    let flag: bool = data.into_val(&env);
-    assert!(flag);
-    assert!(client.is_paused());
-}
-
-#[test]
-fn test_unpause_emits_paused_event_false() {
-    let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
-    client.pause();
-
-    client.unpause();
 
     let events = env.events().all();
     assert!(!events.is_empty());
@@ -588,6 +496,9 @@ fn test_settle_zero_usage_returns_zero_stamps_and_emits_event() {
 
     // Still stamps LastSettlement so SLA monitors see the drain ran.
     assert_eq!(client.get_last_settlement(&agent, &svc), Some(ts));
+}
+
+#[test]
 fn test_init_stamps_schema_version() {
     let env = Env::default();
     let (client, _admin) = setup_initialized(&env);
@@ -600,14 +511,7 @@ fn test_migrate_v1_to_v2_rejected_on_fresh_v2_init() {
     let env = Env::default();
     let (client, _admin) = setup_initialized(&env);
     client.migrate_v1_to_v2();
-// ---------------------------------------------------------------------------
-// service metadata round-trip and slot independence (issue #41)
-//
-// ServiceMetadata, ServiceRegistered, and ServiceDisabled are three
-// independent persistent slots keyed by service_id. These tests prove that
-// writing one never implicitly writes another, and that unregistering only
-// clears the registered slot.
-// ---------------------------------------------------------------------------
+}
 
 #[test]
 fn test_set_service_metadata_round_trips_description_and_owner() {
@@ -714,6 +618,40 @@ fn test_service_slot_toggle_matrix_is_independent() {
     client.set_service_disabled(&svc, &false);
     assert!(client.is_service_registered(&svc));
     assert!(!client.is_service_disabled(&svc));
+}
+
+#[test]
+fn test_pause_emits_paused_event_true() {
+    let env = Env::default();
+    let (client, _admin) = setup_initialized(&env);
+
+    client.pause();
+
+    // Read events immediately after pause(): events().all() only surfaces
+    // events from the most recent contract invocation.
+    let events = env.events().all();
+    assert!(!events.is_empty());
+    let (_addr, topics, data) = events.last().unwrap();
+    let expected_topics: soroban_sdk::Vec<soroban_sdk::Val> =
+        (symbol_short!("paused"),).into_val(&env);
+    assert_eq!(topics, expected_topics);
+    let flag: bool = data.into_val(&env);
+    assert!(flag);
+    assert!(client.is_paused());
+}
+
+#[test]
+fn test_unpause_emits_paused_event_false() {
+    let env = Env::default();
+    let (client, _admin) = setup_initialized(&env);
+    client.pause();
+
+    client.unpause();
+
+    let events = env.events().all();
+    assert!(!events.is_empty());
+    let (_addr, topics, data) = events.last().unwrap();
+    let expected_topics: soroban_sdk::Vec<soroban_sdk::Val> =
         (symbol_short!("paused"),).into_val(&env);
     assert_eq!(topics, expected_topics);
     let flag: bool = data.into_val(&env);
