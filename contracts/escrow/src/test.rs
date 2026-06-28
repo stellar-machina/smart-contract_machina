@@ -2442,3 +2442,230 @@ fn test_compute_billing_independent_per_service() {
     assert_eq!(client.compute_billing(&agent, &svc1), 50);
     assert_eq!(client.compute_billing(&agent, &svc2), 60);
 }
+// ── transfer_service_ownership tests ────────────────────────────────────────
+//
+// Auth matrix covered:
+//   - Current owner transfers → allowed
+//   - Admin transfers on owner's behalf → allowed
+//   - Third-party caller → rejected (NotPendingAdmin)
+//   - No metadata → rejected (ServiceMetadataNotFound #13)
+//   - Paused contract → rejected (ContractPaused #4)
+//
+// Invariants verified:
+//   - description is always preserved after transfer
+//   - owner_chg event carries correct (service_id, old_owner, new_owner)
+//   - get_service_metadata reflects new owner after transfer
+
+/// Helper: register a service with metadata (description + owner).
+fn setup_service_with_metadata<'a>(
+    client: &EscrowClient<'a>,
+    env: &Env,
+    service_id: &Symbol,
+    description: &str,
+    owner: &Address,
+) {
+    client.register_service_with_metadata(
+        service_id,
+        &soroban_sdk::String::from_str(env, description),
+        owner,
+    );
+}
+
+/// Positive: current owner transfers to new owner — succeeds.
+#[test]
+fn test_transfer_ownership_by_owner_succeeds() {
+    let env = Env::default();
+    let (client, _admin) = setup_initialized(&env);
+    let owner = Address::generate(&env);
+    let new_owner = Address::generate(&env);
+    let svc = Symbol::new(&env, "infer");
+
+    setup_service_with_metadata(&client, &env, &svc, "Inference API", &owner);
+    client.transfer_service_ownership(&owner, &svc, &new_owner);
+
+    let meta = client.get_service_metadata(&svc).unwrap();
+    assert_eq!(meta.owner, new_owner);
+}
+
+/// Invariant: description is preserved after transfer.
+#[test]
+fn test_transfer_ownership_preserves_description() {
+    let env = Env::default();
+    let (client, _admin) = setup_initialized(&env);
+    let owner = Address::generate(&env);
+    let new_owner = Address::generate(&env);
+    let svc = Symbol::new(&env, "embed");
+    let desc = "Embedding service for AgentPay";
+
+    setup_service_with_metadata(&client, &env, &svc, desc, &owner);
+    client.transfer_service_ownership(&owner, &svc, &new_owner);
+
+    let meta = client.get_service_metadata(&svc).unwrap();
+    assert_eq!(
+        meta.description,
+        soroban_sdk::String::from_str(&env, desc),
+        "description must not change after ownership transfer"
+    );
+    assert_eq!(meta.owner, new_owner);
+}
+
+/// Positive: admin transfers on the owner's behalf — succeeds.
+#[test]
+fn test_transfer_ownership_by_admin_succeeds() {
+    let env = Env::default();
+    let (client, admin) = setup_initialized(&env);
+    let owner = Address::generate(&env);
+    let new_owner = Address::generate(&env);
+    let svc = Symbol::new(&env, "chat");
+
+    setup_service_with_metadata(&client, &env, &svc, "Chat API", &owner);
+    // Admin calls transfer on behalf of the service owner.
+    client.transfer_service_ownership(&admin, &svc, &new_owner);
+
+    let meta = client.get_service_metadata(&svc).unwrap();
+    assert_eq!(meta.owner, new_owner);
+}
+
+/// Event: owner_chg emits (service_id, old_owner, new_owner) correctly.
+#[test]
+fn test_transfer_ownership_emits_owner_chg_event() {
+    let env = Env::default();
+    let (client, _admin) = setup_initialized(&env);
+    let owner = Address::generate(&env);
+    let new_owner = Address::generate(&env);
+    let svc = Symbol::new(&env, "search");
+
+    setup_service_with_metadata(&client, &env, &svc, "Search API", &owner);
+    client.transfer_service_ownership(&owner, &svc, &new_owner);
+
+    let events = env.events().all();
+    assert!(!events.is_empty());
+    let (_addr, topics, data) = events.last().unwrap();
+
+    let expected_topics: soroban_sdk::Vec<soroban_sdk::Val> =
+        (symbol_short!("owner_chg"),).into_val(&env);
+    assert_eq!(topics, expected_topics, "topic must be owner_chg");
+
+    let decoded: (Symbol, Address, Address) = data.into_val(&env);
+    assert_eq!(decoded.0, svc, "event service_id mismatch");
+    assert_eq!(decoded.1, owner, "event old_owner mismatch");
+    assert_eq!(decoded.2, new_owner, "event new_owner mismatch");
+}
+
+/// Negative: third-party caller (neither owner nor admin) is rejected.
+#[test]
+#[should_panic]
+fn test_transfer_ownership_stranger_rejected() {
+    let env = Env::default();
+    let (client, _admin) = setup_initialized(&env);
+    let owner = Address::generate(&env);
+    let stranger = Address::generate(&env);
+    let new_owner = Address::generate(&env);
+    let svc = Symbol::new(&env, "tts");
+
+    setup_service_with_metadata(&client, &env, &svc, "TTS API", &owner);
+
+    env.mock_auths(&[MockAuth {
+        address: &stranger,
+        invoke: &MockAuthInvoke {
+            contract: &client.address,
+            fn_name: "transfer_service_ownership",
+            args: (stranger.clone(), svc.clone(), new_owner.clone()).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    client.transfer_service_ownership(&stranger, &svc, &new_owner);
+}
+
+/// Negative: transferring a service with no metadata panics #13.
+#[test]
+#[should_panic(expected = "Error(Contract, #13)")]
+fn test_transfer_ownership_no_metadata_panics() {
+    let env = Env::default();
+    let (client, _admin) = setup_initialized(&env);
+    let owner = Address::generate(&env);
+    let new_owner = Address::generate(&env);
+    let svc = Symbol::new(&env, "ghost");
+
+    // No set_service_metadata or register_service_with_metadata called.
+    client.transfer_service_ownership(&owner, &svc, &new_owner);
+}
+
+/// Negative: pause gate fires (#4) before ownership transfer.
+#[test]
+#[should_panic(expected = "Error(Contract, #4)")]
+fn test_transfer_ownership_paused_rejected() {
+    let env = Env::default();
+    let (client, _admin) = setup_initialized(&env);
+    let owner = Address::generate(&env);
+    let new_owner = Address::generate(&env);
+    let svc = Symbol::new(&env, "stt");
+
+    setup_service_with_metadata(&client, &env, &svc, "STT API", &owner);
+    client.pause();
+    client.transfer_service_ownership(&owner, &svc, &new_owner);
+}
+
+/// After transfer, get_service_metadata reflects the new owner.
+#[test]
+fn test_transfer_ownership_metadata_updated() {
+    let env = Env::default();
+    let (client, _admin) = setup_initialized(&env);
+    let owner = Address::generate(&env);
+    let new_owner = Address::generate(&env);
+    let svc = Symbol::new(&env, "ocr");
+    let desc = "OCR service";
+
+    setup_service_with_metadata(&client, &env, &svc, desc, &owner);
+
+    // Confirm initial state.
+    let before = client.get_service_metadata(&svc).unwrap();
+    assert_eq!(before.owner, owner);
+
+    client.transfer_service_ownership(&owner, &svc, &new_owner);
+
+    // Confirm updated state.
+    let after = client.get_service_metadata(&svc).unwrap();
+    assert_eq!(after.owner, new_owner, "owner must be updated");
+    assert_eq!(
+        after.description,
+        soroban_sdk::String::from_str(&env, desc),
+        "description must be unchanged"
+    );
+}
+
+/// Chained transfer: new owner can transfer again — ownership is live.
+#[test]
+fn test_transfer_ownership_chained() {
+    let env = Env::default();
+    let (client, _admin) = setup_initialized(&env);
+    let owner = Address::generate(&env);
+    let second = Address::generate(&env);
+    let third = Address::generate(&env);
+    let svc = Symbol::new(&env, "chain");
+
+    setup_service_with_metadata(&client, &env, &svc, "Chained", &owner);
+    client.transfer_service_ownership(&owner, &svc, &second);
+    client.transfer_service_ownership(&second, &svc, &third);
+
+    let meta = client.get_service_metadata(&svc).unwrap();
+    assert_eq!(meta.owner, third);
+}
+
+/// Original owner cannot transfer again after handing off.
+#[test]
+#[should_panic(expected = "Error(Contract, #6)")]
+fn test_transfer_ownership_old_owner_rejected_after_transfer() {
+    let env = Env::default();
+    let (client, _admin) = setup_initialized(&env);
+    let owner = Address::generate(&env);
+    let new_owner = Address::generate(&env);
+    let third = Address::generate(&env);
+    let svc = Symbol::new(&env, "revoke");
+
+    setup_service_with_metadata(&client, &env, &svc, "Revoke test", &owner);
+    client.transfer_service_ownership(&owner, &svc, &new_owner);
+
+    // Old owner tries to transfer again — must be rejected.
+    client.transfer_service_ownership(&owner, &svc, &third);
+}
