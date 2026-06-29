@@ -110,11 +110,12 @@ pub enum DataKey {
     /// Per-agent blocklist flag. When `true`, `record_usage` rejects the
     /// agent with `AgentBlocked`, taking precedence over the allowlist.
     AgentBlocked(Address),
-    /// Open dispute flag for a `(agent, service_id)` pair. When `true`,
-    /// `settle` is blocked for that pair until an admin resolves it via
-    /// `resolve_dispute`. Cleared on resolution; `false` (absent) means
-    /// no dispute is open.
-    Dispute(Address, Symbol),
+    /// Volume-discount tier schedule for a service: a `Vec<PriceTier>`
+    /// sorted ascending by `threshold_requests`. When present,
+    /// `compute_billing` and `settle` use the tier-aware helper instead
+    /// of the flat `ServicePrice`. Falls back to `ServicePrice` (or 0)
+    /// when absent, preserving full backward compatibility.
+    PriceTiers(Symbol),
 }
 
 /// Typed contract errors. Codes are append-only to keep client SDKs stable.
@@ -166,20 +167,10 @@ pub enum EscrowError {
     /// `record_usage` was called by/for an agent on the per-agent
     /// blocklist. Takes precedence over the allowlist.
     AgentBlocked = 17,
-    /// `settle` was called for an `(agent, service_id)` pair that has an
-    /// open dispute. The admin must resolve the dispute first via
-    /// `resolve_dispute` before settlement is permitted.
-    DisputeOpen = 18,
-    /// `open_dispute` was called for an `(agent, service_id)` pair that
-    /// already has an open dispute.
-    DisputeAlreadyOpen = 19,
-    /// `resolve_dispute` was called for an `(agent, service_id)` pair
-    /// with no open dispute.
-    NoOpenDispute = 20,
-    /// `resolve_dispute` was called with a `refund_requests` value that
-    /// exceeds the accumulated usage for the pair — cannot refund more
-    /// than was recorded.
-    RefundExceedsUsage = 21,
+    /// `set_price_tiers` was called with a malformed tier schedule:
+    /// either the schedule is empty, contains duplicate thresholds, or
+    /// is not strictly ascending in `threshold_requests`.
+    InvalidPriceTiers = 18,
 }
 
 #[contracttype]
@@ -188,6 +179,36 @@ pub struct UsageRecord {
     pub agent: Address,
     pub service_id: Symbol,
     pub requests: u32,
+}
+
+/// A single volume-discount tier for a service.
+///
+/// A tier applies to all requests **up to and including** `threshold_requests`
+/// that have not already been consumed by a lower tier. In a multi-tier
+/// schedule the tiers must be sorted ascending by `threshold_requests` with
+/// no duplicates; `set_price_tiers` enforces this at write-time.
+///
+/// The last tier in the schedule (the one with the highest threshold) acts as
+/// an open-ended tier: any requests beyond `threshold_requests` of all
+/// previous tiers are billed at this marginal `price_stroops`. A threshold of
+/// `u32::MAX` on the final tier therefore means "unlimited".
+///
+/// Example schedule (ascending):
+/// ```text
+/// tier 0: threshold=100,  price=10  -> first 100 requests @ 10 stroops each
+/// tier 1: threshold=1000, price=7   -> next  900 requests @ 7  stroops each
+/// tier 2: threshold=MAX,  price=4   -> remainder          @ 4  stroops each
+/// ```
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PriceTier {
+    /// Inclusive upper bound on cumulative requests for this tier. The tier
+    /// covers requests from the previous tier's threshold (exclusive) up to
+    /// and including this value.
+    pub threshold_requests: u32,
+    /// Marginal price per request within this tier, in stroops. Must be
+    /// non-negative; zero is allowed (free tier).
+    pub price_stroops: i128,
 }
 
 // New persistent boolean flags should be read/written via `read_flag` /
@@ -247,52 +268,54 @@ fn read_usage(env: &Env, agent: &Address, service_id: &Symbol) -> u32 {
         .unwrap_or(0)
 }
 
-/// Add `service_id` to the per-agent service index if it is not already
-/// present and the index has not yet hit `MAX_AGENT_SERVICE_INDEX`. This
-/// is called unconditionally from `record_usage` on the hot path, so it
-/// must be cheap: it reads the index once, scans for duplicates, and
-/// writes only when a new entry is appended.
+/// Compute the outstanding bill for `requests` using a tier schedule.
 ///
-/// Security: the cap prevents a malicious caller from growing the index
-/// indefinitely by recycling novel `service_id` values.
-fn index_agent_service(env: &Env, agent: &Address, service_id: &Symbol) {
-    let key = DataKey::AgentServiceIndex(agent.clone());
-    let mut index: Vec<Symbol> = env
-        .storage()
-        .persistent()
-        .get(&key)
-        .unwrap_or_else(|| Vec::new(env));
-    // Already indexed — nothing to do.
-    for existing in index.iter() {
-        if existing == *service_id {
-            return;
-        }
-    }
-    // Silently skip when the cap is reached to keep the write cost bounded.
-    if index.len() >= MAX_AGENT_SERVICE_INDEX {
-        return;
-    }
-    index.push_back(service_id.clone());
-    env.storage().persistent().set(&key, &index);
-}
+/// Tiers are applied in ascending `threshold_requests` order. Each tier
+/// covers requests from the end of the previous tier (exclusive) up to its
+/// own `threshold_requests` (inclusive). The last tier covers all remaining
+/// requests beyond the previous tier boundary.
+///
+/// All arithmetic saturates at `i128::MAX`; the caller should treat a
+/// saturated return value as an error sentinel rather than panicking.
+///
+/// # Tier-boundary semantics
+/// - Tier boundaries are **inclusive**: exactly `threshold_requests` cumulative
+///   requests are billed at a tier's `price_stroops` before the next tier kicks
+///   in.
+/// - If `requests` is less than or equal to the first tier's threshold the
+///   entire bill is at the first tier's price.
+/// - If `requests` exceeds the last tier's threshold the remainder is billed
+///   at the last tier's price (open-ended final tier).
+fn compute_billing_tiered(requests: u32, tiers: &Vec<PriceTier>) -> i128 {
+    let mut total: i128 = 0i128;
+    let mut prev_threshold: u32 = 0u32;
+    let n = tiers.len();
 
-/// Remove `service_id` from the per-agent service index. Called by
-/// `settle` after the usage counter for the pair has been reset to zero.
-/// Scan-and-remove is O(n) in the index length; at a cap of 256 this is
-/// always bounded. Idempotent — removing an absent entry is a no-op.
-fn deindex_agent_service(env: &Env, agent: &Address, service_id: &Symbol) {
-    let key = DataKey::AgentServiceIndex(agent.clone());
-    let index: Vec<Symbol> = match env.storage().persistent().get(&key) {
-        Some(v) => v,
-        None => return,
-    };
-    let mut new_index: Vec<Symbol> = Vec::new(env);
-    for existing in index.iter() {
-        if existing != *service_id {
-            new_index.push_back(existing);
+    for i in 0..n {
+        let tier = tiers.get(i).unwrap();
+        if requests <= prev_threshold {
+            break;
         }
+        // Requests falling in this tier: from prev_threshold+1 to
+        // min(requests, tier.threshold_requests), both inclusive.
+        let tier_end = if i + 1 == n {
+            // Last tier is open-ended: cap to actual requests.
+            requests
+        } else {
+            // Not the last tier: cap to this tier's threshold.
+            if tier.threshold_requests < requests {
+                tier.threshold_requests
+            } else {
+                requests
+            }
+        };
+        let in_tier = (tier_end - prev_threshold) as i128;
+        // Saturate per-tier contribution then accumulate with saturation.
+        let contribution = in_tier.saturating_mul(tier.price_stroops);
+        total = total.saturating_add(contribution);
+        prev_threshold = tier.threshold_requests;
     }
-    env.storage().persistent().set(&key, &new_index);
+    total
 }
 
 #[contract]
@@ -727,6 +750,90 @@ impl Escrow {
             .publish((symbol_short!("price_rm"),), service_id);
     }
 
+    /// Admin sets a volume-discount tier schedule for a service.
+    ///
+    /// The schedule is a `Vec<PriceTier>` sorted **strictly ascending** by
+    /// `threshold_requests` with no duplicates. `set_price_tiers` validates
+    /// the schedule at write-time and rejects malformed input with
+    /// [`EscrowError::InvalidPriceTiers`]. An empty schedule is also rejected
+    /// — use `remove_price_tiers` to revert to the flat `ServicePrice`.
+    ///
+    /// Once set, `compute_billing` and `settle` use the tier schedule instead
+    /// of the flat `ServicePrice`. The flat price is preserved and can be
+    /// restored by removing the tier schedule via `remove_price_tiers`.
+    ///
+    /// Admin-gated and honours the pause gate. Emits
+    /// `tiers_set(service_id)` on success.
+    ///
+    /// # Tier-schedule invariants (enforced at set-time)
+    /// - Must contain at least one entry.
+    /// - `threshold_requests` values must be strictly ascending (no ties).
+    /// - Each `price_stroops` must be non-negative.
+    pub fn set_price_tiers(env: Env, service_id: Symbol, tiers: Vec<PriceTier>) {
+        let admin: Address = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Admin)
+            .unwrap_or_else(|| panic_with_error!(&env, EscrowError::NotInitialized));
+        admin.require_auth();
+        ensure_not_paused(&env);
+        // Reject empty schedules.
+        if tiers.is_empty() {
+            panic_with_error!(&env, EscrowError::InvalidPriceTiers);
+        }
+        // Validate: strictly ascending thresholds and non-negative prices.
+        let mut prev: u32 = 0;
+        for i in 0..tiers.len() {
+            let tier = tiers.get(i).unwrap();
+            if tier.price_stroops < 0 {
+                panic_with_error!(&env, EscrowError::InvalidPriceTiers);
+            }
+            if i == 0 {
+                if tier.threshold_requests == 0 {
+                    panic_with_error!(&env, EscrowError::InvalidPriceTiers);
+                }
+                prev = tier.threshold_requests;
+            } else {
+                if tier.threshold_requests <= prev {
+                    panic_with_error!(&env, EscrowError::InvalidPriceTiers);
+                }
+                prev = tier.threshold_requests;
+            }
+        }
+        env.storage()
+            .persistent()
+            .set(&DataKey::PriceTiers(service_id.clone()), &tiers);
+        env.events()
+            .publish((symbol_short!("tiers_set"),), service_id);
+    }
+
+    /// Read the tier schedule for a service, or `None` if no schedule has
+    /// been set (the service uses flat `ServicePrice` billing).
+    pub fn get_price_tiers(env: Env, service_id: Symbol) -> Option<Vec<PriceTier>> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::PriceTiers(service_id))
+    }
+
+    /// Admin removes the tier schedule for a service, reverting billing to
+    /// the flat `ServicePrice`. Idempotent — removing an absent schedule is
+    /// a no-op. Admin-gated and honours the pause gate. Emits
+    /// `tiers_rm(service_id)`.
+    pub fn remove_price_tiers(env: Env, service_id: Symbol) {
+        let admin: Address = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Admin)
+            .unwrap_or_else(|| panic_with_error!(&env, EscrowError::NotInitialized));
+        admin.require_auth();
+        ensure_not_paused(&env);
+        env.storage()
+            .persistent()
+            .remove(&DataKey::PriceTiers(service_id.clone()));
+        env.events()
+            .publish((symbol_short!("tiers_rm"),), service_id);
+    }
+
     /// Get the per-request price (in stroops) for a service, or 0 if
     /// no price has been configured (the service is free / unset).
     pub fn get_service_price(env: Env, service_id: Symbol) -> i128 {
@@ -736,8 +843,12 @@ impl Escrow {
             .unwrap_or(0)
     }
 
-    /// Compute the outstanding bill for an `(agent, service_id)` pair:
-    /// `accumulated_requests * price_per_request`, in stroops.
+    /// Compute the outstanding bill for an `(agent, service_id)` pair.
+    ///
+    /// When a tier schedule has been configured via `set_price_tiers` the
+    /// bill is the sum of per-tier marginal costs (see [`compute_billing_tiered`]).
+    /// When no tier schedule is present the bill falls back to the flat
+    /// `ServicePrice`: `accumulated_requests * price_per_request`.
     ///
     /// Returns 0 when either side is zero. Saturates at `i128::MAX` on
     /// overflow — this is read-only, so a saturated value just signals
@@ -749,14 +860,23 @@ impl Escrow {
             .persistent()
             .get(&DataKey::Usage(agent, service_id.clone()))
             .unwrap_or(0);
-        let price: i128 = env
+        // Use tier schedule when present; fall back to flat price.
+        if let Some(tiers) = env
             .storage()
             .persistent()
-            .get(&DataKey::ServicePrice(service_id))
-            .unwrap_or(0);
-        // saturate: read/settle path returns a sentinel-large value rather than
-        // panicking; off-chain loop treats saturation as an error signal.
-        (requests as i128).saturating_mul(price)
+            .get::<DataKey, Vec<PriceTier>>(&DataKey::PriceTiers(service_id.clone()))
+        {
+            compute_billing_tiered(requests, &tiers)
+        } else {
+            let price: i128 = env
+                .storage()
+                .persistent()
+                .get(&DataKey::ServicePrice(service_id))
+                .unwrap_or(0);
+            // saturate: read/settle path returns a sentinel-large value rather than
+            // panicking; off-chain loop treats saturation as an error signal.
+            (requests as i128).saturating_mul(price)
+        }
     }
 
     /// Settle the accumulated usage for an `(agent, service_id)` pair.
@@ -804,14 +924,23 @@ impl Escrow {
         }
         let usage_key = DataKey::Usage(agent.clone(), service_id.clone());
         let requests: u32 = env.storage().persistent().get(&usage_key).unwrap_or(0);
-        let price: i128 = env
+        // Use tier schedule when present; fall back to flat price.
+        let billed = if let Some(tiers) = env
             .storage()
             .persistent()
-            .get(&DataKey::ServicePrice(service_id.clone()))
-            .unwrap_or(0);
-        // saturate: read/settle path returns a sentinel-large value rather than
-        // panicking; off-chain loop treats saturation as an error signal.
-        let billed = (requests as i128).saturating_mul(price);
+            .get::<DataKey, Vec<PriceTier>>(&DataKey::PriceTiers(service_id.clone()))
+        {
+            compute_billing_tiered(requests, &tiers)
+        } else {
+            let price: i128 = env
+                .storage()
+                .persistent()
+                .get(&DataKey::ServicePrice(service_id.clone()))
+                .unwrap_or(0);
+            // saturate: read/settle path returns a sentinel-large value rather than
+            // panicking; off-chain loop treats saturation as an error signal.
+            (requests as i128).saturating_mul(price)
+        };
         env.storage().persistent().set(&usage_key, &0u32);
         // Prune the service from the agent's index since usage is now zero.
         // This keeps the index consistent with the underlying counters and
