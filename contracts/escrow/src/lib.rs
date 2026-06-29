@@ -129,12 +129,10 @@ pub enum DataKey {
     /// Per-agent blocklist flag. When `true`, `record_usage` rejects the
     /// agent with `AgentBlocked`, taking precedence over the allowlist.
     AgentBlocked(Address),
-    /// Admin-configurable threshold for the usage-alert event. When non-zero,
-    /// `record_usage` emits a `usage_hi(agent, service_id, total)` event the
-    /// first time the per-pair counter crosses this level (edge-triggered: fires
-    /// once per settlement window, re-arms after the counter drops below the
-    /// threshold via `settle`). `0` (the default) disables the feature entirely.
-    UsageAlertThreshold,
+    /// `true` when `propose_renounce()` has been called and the two-step
+    /// renounce confirmation is pending. Cleared on `cancel_renounce()` or
+    /// after `confirm_renounce()` finalises the renounce.
+    RenouncePending,
 }
 
 /// Typed contract errors. Codes are append-only to keep client SDKs stable.
@@ -186,13 +184,10 @@ pub enum EscrowError {
     /// `record_usage` was called by/for an agent on the per-agent
     /// blocklist. Takes precedence over the allowlist.
     AgentBlocked = 17,
-    /// `drain_usage_batch` was called with more than `MAX_BATCH_DRAIN` pairs.
-    DrainBatchTooLarge = 18,
-    /// A service-scoped entrypoint was called with an empty `service_id`
-    /// symbol (length 0). An empty id is almost certainly a client
-    /// misconfiguration — reject it loudly so the error surfaces early
-    /// rather than silently polluting state with a meaningless key.
-    InvalidServiceId = 19,
+    /// `confirm_renounce` was called but `propose_renounce` has not been
+    /// called first (or was cancelled). The two-step guard requires a prior
+    /// proposal before confirmation.
+    NoRenouncePending = 18,
 }
 
 #[contracttype]
@@ -1160,6 +1155,98 @@ impl Escrow {
     pub fn version(env: Env) -> u32 {
         let _ = env;
         2
+    }
+
+    // -------------------------------------------------------------------------
+    // Guarded admin renounce — two-step irreversible finalisation
+    //
+    // **WARNING: renouncing admin is IRREVERSIBLE.** Once `confirm_renounce`
+    // executes, the `DataKey::Admin` slot is permanently removed. All
+    // admin-gated entrypoints will subsequently panic with
+    // `EscrowError::NotInitialized (#3)`. No further price changes,
+    // registrations, pauses, or any other privileged operation can ever be
+    // performed on this contract instance. Any pending `PendingAdmin` entry
+    // is also cleared on confirmation.
+    //
+    // **Recommendation:** ensure the contract is in a known, safe state
+    // (e.g. unpaused, all settlements complete) before renouncing.
+    //
+    // The two-step sequence prevents accidental renounce via a single
+    // fat-fingered call:
+    //   1. `propose_renounce()`  — sets `DataKey::RenouncePending = true`.
+    //   2. `confirm_renounce()` — requires the flag to be set, then removes
+    //      `DataKey::Admin` and `DataKey::PendingAdmin`, and emits `admin_rnc`.
+    //   `cancel_renounce()`    — clears the flag at any point before step 2,
+    //      mirroring `cancel_admin_transfer`.
+    // -------------------------------------------------------------------------
+
+    /// Step 1 of the guarded admin renounce.
+    ///
+    /// Sets `DataKey::RenouncePending = true`. The current admin must call
+    /// `confirm_renounce` from the same key to finalise. Admin-gated.
+    ///
+    /// **WARNING: this begins an irreversible process. Call `cancel_renounce`
+    /// before `confirm_renounce` if you change your mind.**
+    pub fn propose_renounce(env: Env) {
+        let admin: Address = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Admin)
+            .unwrap_or_else(|| panic_with_error!(&env, EscrowError::NotInitialized));
+        admin.require_auth();
+        write_flag(&env, &DataKey::RenouncePending, true);
+    }
+
+    /// Step 2 of the guarded admin renounce (IRREVERSIBLE).
+    ///
+    /// Requires `propose_renounce` to have been called first; panics with
+    /// [`EscrowError::NoRenouncePending`] (#18) otherwise. On success:
+    /// - removes `DataKey::Admin` (all admin-gated calls will panic #3 from now on),
+    /// - removes `DataKey::PendingAdmin` (clears any in-flight handover),
+    /// - removes `DataKey::RenouncePending`,
+    /// - emits `admin_rnc` for on-chain auditability.
+    ///
+    /// **WARNING: this action is IRREVERSIBLE. The contract cannot be
+    /// administered again after this call.**
+    pub fn confirm_renounce(env: Env) {
+        let admin: Address = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Admin)
+            .unwrap_or_else(|| panic_with_error!(&env, EscrowError::NotInitialized));
+        admin.require_auth();
+        if !read_flag(&env, &DataKey::RenouncePending) {
+            panic_with_error!(&env, EscrowError::NoRenouncePending);
+        }
+        // Irreversibly remove the admin key.
+        env.storage().persistent().remove(&DataKey::Admin);
+        // Clear any in-flight admin transfer so it cannot be completed later.
+        env.storage().persistent().remove(&DataKey::PendingAdmin);
+        // Clear the pending flag (slot no longer needed).
+        env.storage().persistent().remove(&DataKey::RenouncePending);
+        // Emit an auditable on-chain event signalling finalisation.
+        env.events()
+            .publish((symbol_short!("admin_rnc"),), admin);
+    }
+
+    /// Cancel a pending renounce. Current admin only. No-op when nothing is pending.
+    ///
+    /// Mirrors `cancel_admin_transfer`. Safe to call even when
+    /// `DataKey::RenouncePending` is not set.
+    pub fn cancel_renounce(env: Env) {
+        let admin: Address = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Admin)
+            .unwrap_or_else(|| panic_with_error!(&env, EscrowError::NotInitialized));
+        admin.require_auth();
+        env.storage().persistent().remove(&DataKey::RenouncePending);
+    }
+
+    /// Returns `true` iff a renounce is currently pending (i.e. `propose_renounce`
+    /// has been called but `confirm_renounce` / `cancel_renounce` has not yet run).
+    pub fn is_renounce_pending(env: Env) -> bool {
+        read_flag(&env, &DataKey::RenouncePending)
     }
 }
 

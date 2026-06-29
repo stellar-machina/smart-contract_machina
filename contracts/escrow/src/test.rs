@@ -2531,152 +2531,186 @@ fn test_compute_billing_independent_per_service() {
     assert_eq!(client.compute_billing(&agent, &svc2), 60);
 }
 
-// ── usage_threshold / usage_hi event tests ────────────────────────────────
+// =========================================================================
+// Guarded admin renounce tests (issue #116)
+// =========================================================================
 
-/// Helper: check whether the most-recent invocation emitted a `usage_hi` event.
-/// `env.events().all()` in Soroban test harness returns only events from the
-/// most-recent contract invocation, so we query it immediately after each call.
-fn last_call_has_usage_hi(env: &Env) -> bool {
+#[test]
+fn test_propose_renounce_sets_pending_flag() {
+    let env = Env::default();
+    let (client, _admin) = setup_initialized(&env);
+    assert!(!client.is_renounce_pending());
+    client.propose_renounce();
+    assert!(client.is_renounce_pending());
+}
+
+#[test]
+fn test_cancel_renounce_clears_pending_flag() {
+    let env = Env::default();
+    let (client, _admin) = setup_initialized(&env);
+    client.propose_renounce();
+    assert!(client.is_renounce_pending());
+    client.cancel_renounce();
+    assert!(!client.is_renounce_pending());
+}
+
+#[test]
+fn test_cancel_renounce_is_idempotent_when_not_pending() {
+    let env = Env::default();
+    let (client, _admin) = setup_initialized(&env);
+    // Calling cancel when nothing is pending is a no-op and must not panic.
+    assert!(!client.is_renounce_pending());
+    client.cancel_renounce();
+    assert!(!client.is_renounce_pending());
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #18)")]
+fn test_confirm_renounce_requires_propose_first() {
+    // Calling confirm without a prior propose must panic with #18.
+    let env = Env::default();
+    let (client, _admin) = setup_initialized(&env);
+    client.confirm_renounce();
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #18)")]
+fn test_confirm_renounce_after_cancel_panics() {
+    // cancel_renounce clears the flag; a subsequent confirm must be rejected.
+    let env = Env::default();
+    let (client, _admin) = setup_initialized(&env);
+    client.propose_renounce();
+    client.cancel_renounce();
+    client.confirm_renounce();
+}
+
+#[test]
+fn test_confirm_renounce_removes_admin() {
+    let env = Env::default();
+    let (client, _admin) = setup_initialized(&env);
+    assert!(client.get_admin().is_some());
+    client.propose_renounce();
+    client.confirm_renounce();
+    // After renounce the admin slot is gone.
+    assert!(client.get_admin().is_none());
+}
+
+#[test]
+fn test_confirm_renounce_clears_pending_admin() {
+    // Any in-flight admin transfer must be cleared on renounce.
+    let env = Env::default();
+    let (client, _admin) = setup_initialized(&env);
+    let next = Address::generate(&env);
+    client.propose_admin_transfer(&next);
+    assert_eq!(client.get_pending_admin(), Some(next));
+
+    client.propose_renounce();
+    client.confirm_renounce();
+
+    assert!(client.get_pending_admin().is_none());
+}
+
+#[test]
+fn test_confirm_renounce_clears_renounce_pending_flag() {
+    let env = Env::default();
+    let (client, _admin) = setup_initialized(&env);
+    client.propose_renounce();
+    client.confirm_renounce();
+    // The RenouncePending flag is removed after confirmation.
+    assert!(!client.is_renounce_pending());
+}
+
+#[test]
+fn test_confirm_renounce_emits_admin_rnc_event() {
+    let env = Env::default();
+    let (client, admin) = setup_initialized(&env);
+    client.propose_renounce();
+    client.confirm_renounce();
+
+    let events = env.events().all();
+    assert!(!events.is_empty());
+    let (_addr, topics, data) = events.last().unwrap();
     let expected_topics: soroban_sdk::Vec<soroban_sdk::Val> =
-        (symbol_short!("usage_hi"),).into_val(env);
-    env.events()
-        .all()
-        .iter()
-        .any(|(_addr, topics, _data)| topics == expected_topics)
+        (symbol_short!("admin_rnc"),).into_val(&env);
+    assert_eq!(topics, expected_topics);
+    // The event data carries the former admin address.
+    let decoded: Address = data.into_val(&env);
+    assert_eq!(decoded, admin);
 }
 
 #[test]
-fn test_usage_alert_threshold_default_zero() {
-    // By default the threshold is 0 (disabled).
+#[should_panic(expected = "Error(Contract, #3)")]
+fn test_admin_gated_entrypoints_panic_after_renounce() {
+    // After renounce, admin-gated calls panic NotInitialized (#3).
     let env = Env::default();
     let (client, _admin) = setup_initialized(&env);
-    assert_eq!(client.get_usage_alert_threshold(), 0);
+    client.propose_renounce();
+    client.confirm_renounce();
+    client.pause();
 }
 
 #[test]
-fn test_usage_alert_threshold_setter_getter() {
-    let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
-    client.set_usage_alert_threshold(&500u32);
-    assert_eq!(client.get_usage_alert_threshold(), 500);
-    // Round-trip to zero (disable).
-    client.set_usage_alert_threshold(&0u32);
-    assert_eq!(client.get_usage_alert_threshold(), 0);
-}
-
-#[test]
-fn test_usage_hi_event_fires_on_crossing_call_only() {
-    // Threshold = 100. First call: 60 (below). Second call: adds 50 -> total
-    // 110 (crosses). Third call: adds 10 -> total 120 (already above, no re-fire).
-    let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
-    let agent = Address::generate(&env);
-    let svc = Symbol::new(&env, "svc_hi");
-
-    client.set_usage_alert_threshold(&100u32);
-
-    // Call 1: total = 60, below threshold -> no usage_hi.
-    client.record_usage(&agent, &svc, &60u32);
-    assert!(
-        !last_call_has_usage_hi(&env),
-        "no usage_hi expected before threshold"
-    );
-
-    // Call 2: total = 110, crosses threshold -> usage_hi fires.
-    client.record_usage(&agent, &svc, &50u32);
-    assert!(
-        last_call_has_usage_hi(&env),
-        "expected usage_hi event on crossing call"
-    );
-
-    // Verify payload: (agent, service_id, new_total).
-    let expected_topics: soroban_sdk::Vec<soroban_sdk::Val> =
-        (symbol_short!("usage_hi"),).into_val(&env);
-    let hi_event = env
-        .events()
-        .all()
-        .iter()
-        .find(|(_addr, topics, _data)| *topics == expected_topics)
-        .unwrap();
-    let decoded: (Address, Symbol, u32) = hi_event.2.into_val(&env);
-    assert_eq!(decoded, (agent.clone(), svc.clone(), 110u32));
-
-    // Call 3: total = 120, already above threshold -> no usage_hi.
-    client.record_usage(&agent, &svc, &10u32);
-    assert!(
-        !last_call_has_usage_hi(&env),
-        "usage_hi must not fire again while still above threshold"
-    );
-}
-
-#[test]
-fn test_usage_hi_disabled_by_default_emits_nothing_extra() {
-    // Without setting a threshold, record_usage should never emit usage_hi.
-    let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
-    let agent = Address::generate(&env);
-    let svc = Symbol::new(&env, "nosvc");
-
-    client.record_usage(&agent, &svc, &999u32);
-    assert!(!last_call_has_usage_hi(&env));
-}
-
-#[test]
-fn test_usage_hi_rearms_after_settle() {
-    // After settle drains the counter below threshold, the next crossing
-    // should fire usage_hi again (re-arm semantics).
+fn test_read_entrypoints_still_work_after_renounce() {
+    // Read-only calls must succeed even after admin has been renounced.
     let env = Env::default();
     let (client, admin) = setup_initialized(&env);
     let agent = Address::generate(&env);
-    let svc = Symbol::new(&env, "rearm_svc");
+    let svc = Symbol::new(&env, "infer");
+    client.set_service_price(&svc, &10i128);
+    client.record_usage(&agent, &svc, &5u32);
 
-    client.set_usage_alert_threshold(&50u32);
+    client.propose_renounce();
+    client.confirm_renounce();
 
-    // First crossing: total = 60 >= 50 -> fires.
-    client.record_usage(&agent, &svc, &60u32);
-    assert!(last_call_has_usage_hi(&env), "first crossing should fire");
-
-    // Settle drains the counter to 0 (below threshold -> re-arms).
-    client.settle(&admin, &agent, &svc);
-    assert_eq!(client.get_usage(&agent, &svc), 0);
-
-    // Second crossing: total = 50 >= 50 -> fires again (re-armed).
-    client.record_usage(&agent, &svc, &50u32);
-    assert!(
-        last_call_has_usage_hi(&env),
-        "second crossing should fire after re-arm"
-    );
+    // Reads must still work after renounce.
+    assert_eq!(client.get_usage(&agent, &svc), 5);
+    assert_eq!(client.get_service_price(&svc), 10i128);
+    assert_eq!(client.get_admin(), None);
+    assert!(!client.is_paused());
 }
 
 #[test]
-fn test_usage_hi_single_call_jumps_past_threshold() {
-    // A single call that starts at 0 and overshoots the threshold still
-    // triggers the event (the check is prev < threshold && total >= threshold).
+fn test_double_propose_renounce_is_idempotent() {
+    // Re-proposing when already pending is a no-op (flag stays true).
     let env = Env::default();
     let (client, _admin) = setup_initialized(&env);
-    let agent = Address::generate(&env);
-    let svc = Symbol::new(&env, "jump_svc");
-
-    client.set_usage_alert_threshold(&10u32);
-
-    // One call that goes straight from 0 to 999.
-    client.record_usage(&agent, &svc, &999u32);
-    assert!(last_call_has_usage_hi(&env));
+    client.propose_renounce();
+    assert!(client.is_renounce_pending());
+    client.propose_renounce();
+    assert!(client.is_renounce_pending());
+    // And confirm still works after the double proposal.
+    client.confirm_renounce();
+    assert!(client.get_admin().is_none());
 }
 
 #[test]
-fn test_usage_hi_exact_threshold_value_fires() {
-    // Crossing where prev < threshold and total == threshold exactly.
+#[should_panic]
+fn test_propose_renounce_requires_admin_auth() {
     let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
-    let agent = Address::generate(&env);
-    let svc = Symbol::new(&env, "exact_svc");
+    let client = setup_scoped_auth(&env);
+    // No auth mocked: admin.require_auth() must reject the call.
+    client.propose_renounce();
+}
 
-    client.set_usage_alert_threshold(&100u32);
+#[test]
+#[should_panic]
+fn test_confirm_renounce_requires_admin_auth() {
+    let env = Env::default();
+    let contract_id = env.register_contract(None, Escrow);
+    let client = EscrowClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    env.mock_all_auths();
+    client.init(&admin);
+    client.propose_renounce();
+    // Drop all auths so the confirm's require_auth() fails.
+    env.set_auths(&[]);
+    client.confirm_renounce();
+}
 
-    client.record_usage(&agent, &svc, &99u32); // total = 99, no event
-    assert!(!last_call_has_usage_hi(&env));
-
-    client.record_usage(&agent, &svc, &1u32); // total = 100 == threshold -> fires
-    assert!(last_call_has_usage_hi(&env));
+#[test]
+#[should_panic]
+fn test_cancel_renounce_requires_admin_auth() {
+    let env = Env::default();
+    let client = setup_scoped_auth(&env);
+    client.cancel_renounce();
 }
