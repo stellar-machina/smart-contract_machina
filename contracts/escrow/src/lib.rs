@@ -166,6 +166,11 @@ pub enum EscrowError {
     AgentBlocked = 17,
     /// `drain_usage_batch` was called with more than `MAX_BATCH_DRAIN` pairs.
     DrainBatchTooLarge = 18,
+    /// A service-scoped entrypoint was called with an empty `service_id`
+    /// symbol (length 0). An empty id is almost certainly a client
+    /// misconfiguration — reject it loudly so the error surfaces early
+    /// rather than silently polluting state with a meaningless key.
+    InvalidServiceId = 19,
 }
 
 #[contracttype]
@@ -199,37 +204,16 @@ fn ensure_not_paused(env: &Env) {
     }
 }
 
-/// Read the admin `Address` from persistent storage, panicking with
-/// [`EscrowError::NotInitialized`] if the contract has not yet been set up.
-///
-/// Used by entrypoints that need the admin address for comparison but whose
-/// auth check is performed on a different caller (e.g. `settle` and
-/// `transfer_service_ownership` auth the `caller` argument first, then look up
-/// the admin to decide whether the caller has permission).
-fn get_admin_address(env: &Env) -> Address {
-    env.storage()
-        .persistent()
-        .get(&DataKey::Admin)
-        .unwrap_or_else(|| panic_with_error!(env, EscrowError::NotInitialized))
-}
-
-/// Fetch the admin address and call `require_auth()` on it in one step.
-///
-/// # Helper pattern
-/// Every admin-gated entrypoint needs exactly two things: (a) read the admin
-/// from persistent storage, panicking with [`EscrowError::NotInitialized`] if
-/// the contract has never been initialised, and (b) verify the caller's
-/// authorisation via `Address::require_auth`. Extracting both into this helper
-/// means a new entrypoint cannot accidentally skip either check, and keeps the
-/// call-site boilerplate to a single line.
-///
-/// Returns the admin `Address` so callers that need it for further comparisons
-/// (e.g. `settle`, `transfer_service_ownership`) don't have to read storage
-/// a second time.
-fn require_admin(env: &Env) -> Address {
-    let admin = get_admin_address(env);
-    admin.require_auth();
-    admin
+/// Panics with [`EscrowError::InvalidServiceId`] if `service_id` is the
+/// empty symbol (length == 0). Applied at the top of every service-mutating
+/// entrypoint — `register_service`, `register_service_with_metadata`,
+/// `set_service_price`, `set_service_metadata`, `set_service_disabled`, and
+/// `record_usage` — so an unset or blank id is caught before any storage
+/// write. Non-empty ids pass through unchanged.
+fn ensure_valid_service_id(env: &Env, service_id: &Symbol) {
+    if *service_id == Symbol::new(env, "") {
+        panic_with_error!(env, EscrowError::InvalidServiceId);
+    }
 }
 
 /// Persist a service's metadata (`description`, `owner`) under
@@ -326,7 +310,10 @@ impl Escrow {
         // MinRequestsPerCall, ServiceDisabled, AgentBlocked. Each key is read
         // at most once; the max/min caps are cached in locals below.
         // -------------------------------------------------------------------
-        ensure_not_paused(&env);
+        ensure_valid_service_id(&env, &service_id);
+        if read_flag(&env, &DataKey::Paused) {
+            panic_with_error!(&env, EscrowError::ContractPaused);
+        }
         if requests == 0 {
             panic_with_error!(&env, EscrowError::RequestsMustBePositive);
         }
@@ -580,7 +567,13 @@ impl Escrow {
     /// Emits `price_set(service_id, price_stroops)` only after every
     /// validation passes.
     pub fn set_service_price(env: Env, service_id: Symbol, price_stroops: i128) {
-        require_admin(&env);
+        ensure_valid_service_id(&env, &service_id);
+        let admin: Address = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Admin)
+            .unwrap_or_else(|| panic_with_error!(&env, EscrowError::NotInitialized));
+        admin.require_auth();
         ensure_not_paused(&env);
         if price_stroops < 0 {
             panic_with_error!(&env, EscrowError::RequestsMustBePositive);
@@ -863,7 +856,13 @@ impl Escrow {
     /// Register a service so `record_usage` accepts it under strict
     /// registration. Admin-gated and idempotent.
     pub fn register_service(env: Env, service_id: Symbol) {
-        require_admin(&env);
+        ensure_valid_service_id(&env, &service_id);
+        let admin: Address = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Admin)
+            .unwrap_or_else(|| panic_with_error!(&env, EscrowError::NotInitialized));
+        admin.require_auth();
         ensure_not_paused(&env);
         write_flag(&env, &DataKey::ServiceRegistered(service_id), true);
     }
@@ -971,7 +970,13 @@ impl Escrow {
     /// causes `record_usage` to panic with `ServiceDisabled` for that
     /// id; registration and metadata are preserved.
     pub fn set_service_disabled(env: Env, service_id: Symbol, disabled: bool) {
-        require_admin(&env);
+        ensure_valid_service_id(&env, &service_id);
+        let admin: Address = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Admin)
+            .unwrap_or_else(|| panic_with_error!(&env, EscrowError::NotInitialized));
+        admin.require_auth();
         ensure_not_paused(&env);
         write_flag(&env, &DataKey::ServiceDisabled(service_id), disabled);
     }
@@ -980,7 +985,13 @@ impl Escrow {
     /// under `DataKey::ServiceMetadata(service_id)`. Description is
     /// capped at 256 UTF-8 bytes to bound storage cost.
     pub fn set_service_metadata(env: Env, service_id: Symbol, description: String, owner: Address) {
-        require_admin(&env);
+        ensure_valid_service_id(&env, &service_id);
+        let admin: Address = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Admin)
+            .unwrap_or_else(|| panic_with_error!(&env, EscrowError::NotInitialized));
+        admin.require_auth();
         ensure_not_paused(&env);
         write_service_metadata(&env, &service_id, description, owner);
     }
@@ -1000,7 +1011,13 @@ impl Escrow {
         description: String,
         owner: Address,
     ) {
-        require_admin(&env);
+        ensure_valid_service_id(&env, &service_id);
+        let admin: Address = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Admin)
+            .unwrap_or_else(|| panic_with_error!(&env, EscrowError::NotInitialized));
+        admin.require_auth();
         ensure_not_paused(&env);
         write_flag(&env, &DataKey::ServiceRegistered(service_id.clone()), true);
         write_service_metadata(&env, &service_id, description, owner.clone());

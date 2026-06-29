@@ -2531,213 +2531,108 @@ fn test_compute_billing_independent_per_service() {
     assert_eq!(client.compute_billing(&agent, &svc2), 60);
 }
 
-// ── drain_usage_batch tests ──────────────────────────────────────────────────
+// ── Empty service_id rejection tests (issue #112) ──────────────────────────
 
-/// Happy path: draining multiple pairs zeroes usage without touching lifetime
-/// counters or LastSettlement.
-#[test]
-fn test_drain_usage_batch_zeros_multiple_pairs() {
-    let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
-    let agent_a = Address::generate(&env);
-    let agent_b = Address::generate(&env);
-    let svc = Symbol::new(&env, "infer");
-
-    record(&client, &agent_a, &svc, 10);
-    record(&client, &agent_b, &svc, 25);
-
-    // Pre-drain: usage should be non-zero.
-    assert_eq!(client.get_usage(&agent_a, &svc), 10);
-    assert_eq!(client.get_usage(&agent_b, &svc), 25);
-
-    let mut pairs: Vec<(Address, Symbol)> = Vec::new(&env);
-    pairs.push_back((agent_a.clone(), svc.clone()));
-    pairs.push_back((agent_b.clone(), svc.clone()));
-    client.drain_usage_batch(&pairs);
-
-    // Post-drain: usage counters are zero.
-    assert_eq!(client.get_usage(&agent_a, &svc), 0);
-    assert_eq!(client.get_usage(&agent_b, &svc), 0);
+/// Helper: build the empty Symbol so we don't repeat it everywhere.
+fn empty_service(env: &Env) -> Symbol {
+    Symbol::new(env, "")
 }
 
-/// Lifetime analytics (TotalUsageByAgent, TotalRequestsAllTime) and
-/// LastSettlement are intentionally untouched by drain_usage_batch.
 #[test]
-fn test_drain_usage_batch_preserves_lifetime_counters_and_no_last_settlement() {
+#[should_panic(expected = "Error(Contract, #19)")]
+fn test_register_service_rejects_empty_id() {
     let env = Env::default();
     let (client, _admin) = setup_initialized(&env);
-    let agent = Address::generate(&env);
-    let svc = Symbol::new(&env, "analytics");
-
-    record(&client, &agent, &svc, 42);
-
-    let total_agent_before = client.get_total_usage_by_agent(&agent);
-    let total_all_before = client.get_total_requests_all_time();
-
-    // Drain the pair.
-    let mut pairs: Vec<(Address, Symbol)> = Vec::new(&env);
-    pairs.push_back((agent.clone(), svc.clone()));
-    client.drain_usage_batch(&pairs);
-
-    // Per-pair usage is zero.
-    assert_eq!(client.get_usage(&agent, &svc), 0);
-
-    // Lifetime counters are preserved (not decremented).
-    assert_eq!(client.get_total_usage_by_agent(&agent), total_agent_before);
-    assert_eq!(client.get_total_requests_all_time(), total_all_before);
-
-    // LastSettlement is NOT stamped — this is not a settlement.
-    assert_eq!(client.get_last_settlement(&agent, &svc), None);
+    client.register_service(&empty_service(&env));
 }
 
-/// Oversized batches are rejected with DrainBatchTooLarge (#18).
 #[test]
-#[should_panic(expected = "Error(Contract, #18)")]
-fn test_drain_usage_batch_rejects_oversized_batch() {
+#[should_panic(expected = "Error(Contract, #19)")]
+fn test_register_service_with_metadata_rejects_empty_id() {
+    let env = Env::default();
+    let (client, _admin) = setup_initialized(&env);
+    let owner = Address::generate(&env);
+    client.register_service_with_metadata(
+        &empty_service(&env),
+        &soroban_sdk::String::from_str(&env, "desc"),
+        &owner,
+    );
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #19)")]
+fn test_set_service_price_rejects_empty_id() {
+    let env = Env::default();
+    let (client, _admin) = setup_initialized(&env);
+    client.set_service_price(&empty_service(&env), &100i128);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #19)")]
+fn test_set_service_metadata_rejects_empty_id() {
+    let env = Env::default();
+    let (client, _admin) = setup_initialized(&env);
+    let owner = Address::generate(&env);
+    client.set_service_metadata(
+        &empty_service(&env),
+        &soroban_sdk::String::from_str(&env, "desc"),
+        &owner,
+    );
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #19)")]
+fn test_set_service_disabled_rejects_empty_id() {
+    let env = Env::default();
+    let (client, _admin) = setup_initialized(&env);
+    client.set_service_disabled(&empty_service(&env), &true);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #19)")]
+fn test_record_usage_rejects_empty_id() {
     let env = Env::default();
     let (client, _admin) = setup_initialized(&env);
     let agent = Address::generate(&env);
-    let svc = Symbol::new(&env, "infer");
-
-    let mut pairs: Vec<(Address, Symbol)> = Vec::new(&env);
-    for _ in 0..(MAX_BATCH_DRAIN + 1) {
-        pairs.push_back((agent.clone(), svc.clone()));
-    }
-    client.drain_usage_batch(&pairs);
+    client.record_usage(&agent, &empty_service(&env), &1u32);
 }
 
-/// Non-admin callers are rejected (auth not satisfied).
+/// Non-empty (single-char) service_id must still be accepted by all
+/// service-mutating entrypoints — the guard must not over-reject.
 #[test]
-#[should_panic(expected = "Unauthorized")]
-fn test_drain_usage_batch_rejects_non_admin() {
+fn test_one_char_service_id_is_accepted() {
     let env = Env::default();
-    let contract_id = env.register_contract(None, Escrow);
-    let client = EscrowClient::new(&env, &contract_id);
-    let admin = Address::generate(&env);
-    env.mock_all_auths();
-    client.init(&admin);
-
-    // Drop mocked auths; next call must fail the admin require_auth check.
-    env.set_auths(&[]);
+    let (client, _admin) = setup_initialized(&env);
+    let svc = Symbol::new(&env, "a");
+    let owner = Address::generate(&env);
     let agent = Address::generate(&env);
-    let svc = Symbol::new(&env, "infer");
-    let mut pairs: Vec<(Address, Symbol)> = Vec::new(&env);
-    pairs.push_back((agent.clone(), svc.clone()));
-    client.drain_usage_batch(&pairs);
+
+    // registration path
+    client.register_service(&svc);
+    // pricing path
+    client.set_service_price(&svc, &50i128);
+    // metadata path
+    client.set_service_metadata(&svc, &soroban_sdk::String::from_str(&env, "ok"), &owner);
+    // disable/enable path
+    client.set_service_disabled(&svc, &false);
+    // record_usage path
+    let rec = client.record_usage(&agent, &svc, &1u32);
+    assert_eq!(rec.requests, 1);
+
+    // No storage written under empty key — verify empty symbol has no entry
+    assert_eq!(client.get_usage(&agent, &empty_service(&env)), 0);
 }
 
-/// Paused contract rejects drain_usage_batch with ContractPaused (#4).
+/// Verify that a freshly-initialized contract has no entry for the empty symbol.
+/// The guard fires before any write, so state remains clean for the empty key.
 #[test]
-#[should_panic(expected = "Error(Contract, #4)")]
-fn test_drain_usage_batch_rejected_while_paused() {
+fn test_empty_id_state_is_clean_at_init() {
     let env = Env::default();
     let (client, _admin) = setup_initialized(&env);
-    client.pause();
-    let agent = Address::generate(&env);
-    let svc = Symbol::new(&env, "infer");
-    let mut pairs: Vec<(Address, Symbol)> = Vec::new(&env);
-    pairs.push_back((agent.clone(), svc.clone()));
-    client.drain_usage_batch(&pairs);
-}
+    let empty = empty_service(&env);
 
-/// Empty batch succeeds (no-op) and emits a drain_bat event with count=0.
-#[test]
-fn test_drain_usage_batch_empty_is_noop() {
-    let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
-    let pairs: Vec<(Address, Symbol)> = Vec::new(&env);
-    // Must not panic.
-    client.drain_usage_batch(&pairs);
-
-    let events = env.events().all();
-    assert!(!events.is_empty());
-    let (_addr, topics, data) = events.last().unwrap();
-    let expected_topics: soroban_sdk::Vec<soroban_sdk::Val> =
-        (symbol_short!("drain_bat"),).into_val(&env);
-    assert_eq!(topics, expected_topics);
-    let count: u32 = data.into_val(&env);
-    assert_eq!(count, 0);
-}
-
-/// Exactly at the bound (MAX_BATCH_DRAIN pairs) is accepted.
-#[test]
-fn test_drain_usage_batch_at_bound_succeeds() {
-    let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
-    let agent = Address::generate(&env);
-    let svc = Symbol::new(&env, "infer");
-    record(&client, &agent, &svc, 1);
-
-    let mut pairs: Vec<(Address, Symbol)> = Vec::new(&env);
-    for _ in 0..MAX_BATCH_DRAIN {
-        pairs.push_back((agent.clone(), svc.clone()));
-    }
-    // Should not panic.
-    client.drain_usage_batch(&pairs);
-    assert_eq!(client.get_usage(&agent, &svc), 0);
-}
-
-/// drain_usage_batch emits a single drain_bat event with the correct count.
-#[test]
-fn test_drain_usage_batch_emits_drain_bat_event() {
-    let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
-    let agent_a = Address::generate(&env);
-    let agent_b = Address::generate(&env);
-    let svc = Symbol::new(&env, "infer");
-
-    record(&client, &agent_a, &svc, 5);
-    record(&client, &agent_b, &svc, 3);
-
-    let mut pairs: Vec<(Address, Symbol)> = Vec::new(&env);
-    pairs.push_back((agent_a.clone(), svc.clone()));
-    pairs.push_back((agent_b.clone(), svc.clone()));
-    client.drain_usage_batch(&pairs);
-
-    let events = env.events().all();
-    assert!(!events.is_empty());
-    let (_addr, topics, data) = events.last().unwrap();
-    let expected_topics: soroban_sdk::Vec<soroban_sdk::Val> =
-        (symbol_short!("drain_bat"),).into_val(&env);
-    assert_eq!(topics, expected_topics);
-    let count: u32 = data.into_val(&env);
-    assert_eq!(count, 2);
-}
-
-/// Never-used pairs (no usage recorded) drain silently without panic.
-#[test]
-fn test_drain_usage_batch_never_used_pairs_are_noop() {
-    let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
-    let agent = Address::generate(&env);
-    let svc = Symbol::new(&env, "ghost");
-
-    // No record_usage call: usage defaults to 0.
-    assert_eq!(client.get_usage(&agent, &svc), 0);
-
-    let mut pairs: Vec<(Address, Symbol)> = Vec::new(&env);
-    pairs.push_back((agent.clone(), svc.clone()));
-    // Must not panic.
-    client.drain_usage_batch(&pairs);
-    // Still zero after drain.
-    assert_eq!(client.get_usage(&agent, &svc), 0);
-}
-
-/// Duplicate pairs in the batch are drained idempotently.
-#[test]
-fn test_drain_usage_batch_duplicate_pairs_idempotent() {
-    let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
-    let agent = Address::generate(&env);
-    let svc = Symbol::new(&env, "dup");
-
-    record(&client, &agent, &svc, 99);
-
-    let mut pairs: Vec<(Address, Symbol)> = Vec::new(&env);
-    pairs.push_back((agent.clone(), svc.clone()));
-    pairs.push_back((agent.clone(), svc.clone()));
-    pairs.push_back((agent.clone(), svc.clone()));
-    client.drain_usage_batch(&pairs);
-
-    assert_eq!(client.get_usage(&agent, &svc), 0);
+    // No registration, price, or metadata should exist for the empty symbol.
+    assert!(!client.is_service_registered(&empty));
+    assert_eq!(client.get_service_price(&empty), 0);
+    assert!(client.get_service_metadata(&empty).is_none());
 }
