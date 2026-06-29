@@ -6,6 +6,11 @@ Soroban smart contracts for the AgentPay protocol: escrow, usage recording, and 
 
 - **escrow** — Records usage and supports settlement logic for machine-to-machine payments.
 
+## Documentation
+
+- [CHANGELOG](CHANGELOG.md) — versioned history of entrypoints, events, and error codes; contribution conventions.
+- [EscrowError code table](docs/escrow/errors.md) — full reference for all 17 error codes: trigger conditions, overloaded codes, and the entrypoints that raise each code.
+
 ### Service ownership handover
 
 A service's `ServiceMetadata` carries a `description` and an `owner`. The
