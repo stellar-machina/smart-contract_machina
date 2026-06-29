@@ -2442,3 +2442,109 @@ fn test_compute_billing_independent_per_service() {
     assert_eq!(client.compute_billing(&agent, &svc1), 50);
     assert_eq!(client.compute_billing(&agent, &svc2), 60);
 }
+
+// ── Empty service_id rejection tests (issue #112) ──────────────────────────
+
+/// Helper: build the empty Symbol so we don't repeat it everywhere.
+fn empty_service(env: &Env) -> Symbol {
+    Symbol::new(env, "")
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #19)")]
+fn test_register_service_rejects_empty_id() {
+    let env = Env::default();
+    let (client, _admin) = setup_initialized(&env);
+    client.register_service(&empty_service(&env));
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #19)")]
+fn test_register_service_with_metadata_rejects_empty_id() {
+    let env = Env::default();
+    let (client, _admin) = setup_initialized(&env);
+    let owner = Address::generate(&env);
+    client.register_service_with_metadata(
+        &empty_service(&env),
+        &soroban_sdk::String::from_str(&env, "desc"),
+        &owner,
+    );
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #19)")]
+fn test_set_service_price_rejects_empty_id() {
+    let env = Env::default();
+    let (client, _admin) = setup_initialized(&env);
+    client.set_service_price(&empty_service(&env), &100i128);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #19)")]
+fn test_set_service_metadata_rejects_empty_id() {
+    let env = Env::default();
+    let (client, _admin) = setup_initialized(&env);
+    let owner = Address::generate(&env);
+    client.set_service_metadata(
+        &empty_service(&env),
+        &soroban_sdk::String::from_str(&env, "desc"),
+        &owner,
+    );
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #19)")]
+fn test_set_service_disabled_rejects_empty_id() {
+    let env = Env::default();
+    let (client, _admin) = setup_initialized(&env);
+    client.set_service_disabled(&empty_service(&env), &true);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #19)")]
+fn test_record_usage_rejects_empty_id() {
+    let env = Env::default();
+    let (client, _admin) = setup_initialized(&env);
+    let agent = Address::generate(&env);
+    client.record_usage(&agent, &empty_service(&env), &1u32);
+}
+
+/// Non-empty (single-char) service_id must still be accepted by all
+/// service-mutating entrypoints — the guard must not over-reject.
+#[test]
+fn test_one_char_service_id_is_accepted() {
+    let env = Env::default();
+    let (client, _admin) = setup_initialized(&env);
+    let svc = Symbol::new(&env, "a");
+    let owner = Address::generate(&env);
+    let agent = Address::generate(&env);
+
+    // registration path
+    client.register_service(&svc);
+    // pricing path
+    client.set_service_price(&svc, &50i128);
+    // metadata path
+    client.set_service_metadata(&svc, &soroban_sdk::String::from_str(&env, "ok"), &owner);
+    // disable/enable path
+    client.set_service_disabled(&svc, &false);
+    // record_usage path
+    let rec = client.record_usage(&agent, &svc, &1u32);
+    assert_eq!(rec.requests, 1);
+
+    // No storage written under empty key — verify empty symbol has no entry
+    assert_eq!(client.get_usage(&agent, &empty_service(&env)), 0);
+}
+
+/// Verify that a freshly-initialized contract has no entry for the empty symbol.
+/// The guard fires before any write, so state remains clean for the empty key.
+#[test]
+fn test_empty_id_state_is_clean_at_init() {
+    let env = Env::default();
+    let (client, _admin) = setup_initialized(&env);
+    let empty = empty_service(&env);
+
+    // No registration, price, or metadata should exist for the empty symbol.
+    assert!(!client.is_service_registered(&empty));
+    assert_eq!(client.get_service_price(&empty), 0);
+    assert!(client.get_service_metadata(&empty).is_none());
+}

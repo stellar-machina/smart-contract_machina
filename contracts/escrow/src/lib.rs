@@ -153,6 +153,13 @@ pub enum EscrowError {
     /// `record_usage` was called by/for an agent on the per-agent
     /// blocklist. Takes precedence over the allowlist.
     AgentBlocked = 17,
+    /// `drain_usage_batch` was called with more than `MAX_BATCH_DRAIN` pairs.
+    DrainBatchTooLarge = 18,
+    /// A service-scoped entrypoint was called with an empty `service_id`
+    /// symbol (length 0). An empty id is almost certainly a client
+    /// misconfiguration — reject it loudly so the error surfaces early
+    /// rather than silently polluting state with a meaningless key.
+    InvalidServiceId = 19,
 }
 
 #[contracttype]
@@ -183,6 +190,18 @@ fn write_flag(env: &Env, key: &DataKey, value: bool) {
 fn ensure_not_paused(env: &Env) {
     if read_flag(env, &DataKey::Paused) {
         panic_with_error!(env, EscrowError::ContractPaused);
+    }
+}
+
+/// Panics with [`EscrowError::InvalidServiceId`] if `service_id` is the
+/// empty symbol (length == 0). Applied at the top of every service-mutating
+/// entrypoint — `register_service`, `register_service_with_metadata`,
+/// `set_service_price`, `set_service_metadata`, `set_service_disabled`, and
+/// `record_usage` — so an unset or blank id is caught before any storage
+/// write. Non-empty ids pass through unchanged.
+fn ensure_valid_service_id(env: &Env, service_id: &Symbol) {
+    if *service_id == Symbol::new(env, "") {
+        panic_with_error!(env, EscrowError::InvalidServiceId);
     }
 }
 
@@ -278,6 +297,7 @@ impl Escrow {
         // max/min caps are cached in locals below, and the usage counter (read
         // further down) is read exactly once. No value is read twice.
         // -------------------------------------------------------------------
+        ensure_valid_service_id(&env, &service_id);
         if read_flag(&env, &DataKey::Paused) {
             panic_with_error!(&env, EscrowError::ContractPaused);
         }
@@ -480,6 +500,7 @@ impl Escrow {
     /// Emits `price_set(service_id, price_stroops)` only after every
     /// validation passes.
     pub fn set_service_price(env: Env, service_id: Symbol, price_stroops: i128) {
+        ensure_valid_service_id(&env, &service_id);
         let admin: Address = env
             .storage()
             .persistent()
@@ -826,6 +847,7 @@ impl Escrow {
     /// Register a service so `record_usage` accepts it under strict
     /// registration. Admin-gated and idempotent.
     pub fn register_service(env: Env, service_id: Symbol) {
+        ensure_valid_service_id(&env, &service_id);
         let admin: Address = env
             .storage()
             .persistent()
@@ -964,6 +986,7 @@ impl Escrow {
     /// causes `record_usage` to panic with `ServiceDisabled` for that
     /// id; registration and metadata are preserved.
     pub fn set_service_disabled(env: Env, service_id: Symbol, disabled: bool) {
+        ensure_valid_service_id(&env, &service_id);
         let admin: Address = env
             .storage()
             .persistent()
@@ -978,6 +1001,7 @@ impl Escrow {
     /// under `DataKey::ServiceMetadata(service_id)`. Description is
     /// capped at 256 UTF-8 bytes to bound storage cost.
     pub fn set_service_metadata(env: Env, service_id: Symbol, description: String, owner: Address) {
+        ensure_valid_service_id(&env, &service_id);
         let admin: Address = env
             .storage()
             .persistent()
@@ -1003,6 +1027,7 @@ impl Escrow {
         description: String,
         owner: Address,
     ) {
+        ensure_valid_service_id(&env, &service_id);
         let admin: Address = env
             .storage()
             .persistent()
