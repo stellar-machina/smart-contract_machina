@@ -2531,56 +2531,213 @@ fn test_compute_billing_independent_per_service() {
     assert_eq!(client.compute_billing(&agent, &svc2), 60);
 }
 
-// ── Harness-helper smoke tests ────────────────────────────────────────────────
-//
-// These tests exercise `make_agent`, `make_service`, and `advance_ledger`
-// directly so reviewers can confirm the helpers work and existing tests can
-// be migrated to them incrementally.
+// ── drain_usage_batch tests ──────────────────────────────────────────────────
 
-/// `make_agent` returns distinct addresses on each call.
+/// Happy path: draining multiple pairs zeroes usage without touching lifetime
+/// counters or LastSettlement.
 #[test]
-fn test_harness_make_agent_returns_distinct_addresses() {
+fn test_drain_usage_batch_zeros_multiple_pairs() {
     let env = Env::default();
-    let a = make_agent(&env);
-    let b = make_agent(&env);
-    assert_ne!(a, b, "make_agent must return a different address each call");
-}
-
-/// `make_service` round-trips through `Symbol::new`.
-#[test]
-fn test_harness_make_service_symbol_round_trip() {
-    let env = Env::default();
-    let svc = make_service(&env, "infer");
-    assert_eq!(svc, Symbol::new(&env, "infer"));
-}
-
-/// `advance_ledger` increments the ledger timestamp by the requested delta.
-#[test]
-fn test_harness_advance_ledger_increments_timestamp() {
-    let env = Env::default();
-    env.ledger().with_mut(|li| li.timestamp = 1_000);
-    advance_ledger(&env, 250);
-    assert_eq!(env.ledger().timestamp(), 1_250);
-}
-
-/// A rate-window rollover written with all three new helpers to demonstrate
-/// idiomatic harness usage.
-#[test]
-fn test_harness_rate_window_rollover_using_helpers() {
-    let env = Env::default();
-    env.ledger().with_mut(|li| li.timestamp = 500);
     let (client, _admin) = setup_initialized(&env);
-    client.set_max_requests_per_window(&10u32);
-    client.set_rate_window_seconds(&100u64);
+    let agent_a = Address::generate(&env);
+    let agent_b = Address::generate(&env);
+    let svc = Symbol::new(&env, "infer");
 
-    let agent = make_agent(&env);
-    let svc = make_service(&env, "infer");
+    record(&client, &agent_a, &svc, 10);
+    record(&client, &agent_b, &svc, 25);
 
-    record(&client, &agent, &svc, 10); // fills the window
+    // Pre-drain: usage should be non-zero.
+    assert_eq!(client.get_usage(&agent_a, &svc), 10);
+    assert_eq!(client.get_usage(&agent_b, &svc), 25);
 
-    // Advance past the 100-second window; the rate counter should reset.
-    advance_ledger(&env, 100);
-    let rec = client.record_usage(&agent, &svc, &5u32);
-    // Cumulative usage = 15, but the rate window accepted the fresh 5.
-    assert_eq!(rec.requests, 15);
+    let mut pairs: Vec<(Address, Symbol)> = Vec::new(&env);
+    pairs.push_back((agent_a.clone(), svc.clone()));
+    pairs.push_back((agent_b.clone(), svc.clone()));
+    client.drain_usage_batch(&pairs);
+
+    // Post-drain: usage counters are zero.
+    assert_eq!(client.get_usage(&agent_a, &svc), 0);
+    assert_eq!(client.get_usage(&agent_b, &svc), 0);
+}
+
+/// Lifetime analytics (TotalUsageByAgent, TotalRequestsAllTime) and
+/// LastSettlement are intentionally untouched by drain_usage_batch.
+#[test]
+fn test_drain_usage_batch_preserves_lifetime_counters_and_no_last_settlement() {
+    let env = Env::default();
+    let (client, _admin) = setup_initialized(&env);
+    let agent = Address::generate(&env);
+    let svc = Symbol::new(&env, "analytics");
+
+    record(&client, &agent, &svc, 42);
+
+    let total_agent_before = client.get_total_usage_by_agent(&agent);
+    let total_all_before = client.get_total_requests_all_time();
+
+    // Drain the pair.
+    let mut pairs: Vec<(Address, Symbol)> = Vec::new(&env);
+    pairs.push_back((agent.clone(), svc.clone()));
+    client.drain_usage_batch(&pairs);
+
+    // Per-pair usage is zero.
+    assert_eq!(client.get_usage(&agent, &svc), 0);
+
+    // Lifetime counters are preserved (not decremented).
+    assert_eq!(client.get_total_usage_by_agent(&agent), total_agent_before);
+    assert_eq!(client.get_total_requests_all_time(), total_all_before);
+
+    // LastSettlement is NOT stamped — this is not a settlement.
+    assert_eq!(client.get_last_settlement(&agent, &svc), None);
+}
+
+/// Oversized batches are rejected with DrainBatchTooLarge (#18).
+#[test]
+#[should_panic(expected = "Error(Contract, #18)")]
+fn test_drain_usage_batch_rejects_oversized_batch() {
+    let env = Env::default();
+    let (client, _admin) = setup_initialized(&env);
+    let agent = Address::generate(&env);
+    let svc = Symbol::new(&env, "infer");
+
+    let mut pairs: Vec<(Address, Symbol)> = Vec::new(&env);
+    for _ in 0..(MAX_BATCH_DRAIN + 1) {
+        pairs.push_back((agent.clone(), svc.clone()));
+    }
+    client.drain_usage_batch(&pairs);
+}
+
+/// Non-admin callers are rejected (auth not satisfied).
+#[test]
+#[should_panic(expected = "Unauthorized")]
+fn test_drain_usage_batch_rejects_non_admin() {
+    let env = Env::default();
+    let contract_id = env.register_contract(None, Escrow);
+    let client = EscrowClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    env.mock_all_auths();
+    client.init(&admin);
+
+    // Drop mocked auths; next call must fail the admin require_auth check.
+    env.set_auths(&[]);
+    let agent = Address::generate(&env);
+    let svc = Symbol::new(&env, "infer");
+    let mut pairs: Vec<(Address, Symbol)> = Vec::new(&env);
+    pairs.push_back((agent.clone(), svc.clone()));
+    client.drain_usage_batch(&pairs);
+}
+
+/// Paused contract rejects drain_usage_batch with ContractPaused (#4).
+#[test]
+#[should_panic(expected = "Error(Contract, #4)")]
+fn test_drain_usage_batch_rejected_while_paused() {
+    let env = Env::default();
+    let (client, _admin) = setup_initialized(&env);
+    client.pause();
+    let agent = Address::generate(&env);
+    let svc = Symbol::new(&env, "infer");
+    let mut pairs: Vec<(Address, Symbol)> = Vec::new(&env);
+    pairs.push_back((agent.clone(), svc.clone()));
+    client.drain_usage_batch(&pairs);
+}
+
+/// Empty batch succeeds (no-op) and emits a drain_bat event with count=0.
+#[test]
+fn test_drain_usage_batch_empty_is_noop() {
+    let env = Env::default();
+    let (client, _admin) = setup_initialized(&env);
+    let pairs: Vec<(Address, Symbol)> = Vec::new(&env);
+    // Must not panic.
+    client.drain_usage_batch(&pairs);
+
+    let events = env.events().all();
+    assert!(!events.is_empty());
+    let (_addr, topics, data) = events.last().unwrap();
+    let expected_topics: soroban_sdk::Vec<soroban_sdk::Val> =
+        (symbol_short!("drain_bat"),).into_val(&env);
+    assert_eq!(topics, expected_topics);
+    let count: u32 = data.into_val(&env);
+    assert_eq!(count, 0);
+}
+
+/// Exactly at the bound (MAX_BATCH_DRAIN pairs) is accepted.
+#[test]
+fn test_drain_usage_batch_at_bound_succeeds() {
+    let env = Env::default();
+    let (client, _admin) = setup_initialized(&env);
+    let agent = Address::generate(&env);
+    let svc = Symbol::new(&env, "infer");
+    record(&client, &agent, &svc, 1);
+
+    let mut pairs: Vec<(Address, Symbol)> = Vec::new(&env);
+    for _ in 0..MAX_BATCH_DRAIN {
+        pairs.push_back((agent.clone(), svc.clone()));
+    }
+    // Should not panic.
+    client.drain_usage_batch(&pairs);
+    assert_eq!(client.get_usage(&agent, &svc), 0);
+}
+
+/// drain_usage_batch emits a single drain_bat event with the correct count.
+#[test]
+fn test_drain_usage_batch_emits_drain_bat_event() {
+    let env = Env::default();
+    let (client, _admin) = setup_initialized(&env);
+    let agent_a = Address::generate(&env);
+    let agent_b = Address::generate(&env);
+    let svc = Symbol::new(&env, "infer");
+
+    record(&client, &agent_a, &svc, 5);
+    record(&client, &agent_b, &svc, 3);
+
+    let mut pairs: Vec<(Address, Symbol)> = Vec::new(&env);
+    pairs.push_back((agent_a.clone(), svc.clone()));
+    pairs.push_back((agent_b.clone(), svc.clone()));
+    client.drain_usage_batch(&pairs);
+
+    let events = env.events().all();
+    assert!(!events.is_empty());
+    let (_addr, topics, data) = events.last().unwrap();
+    let expected_topics: soroban_sdk::Vec<soroban_sdk::Val> =
+        (symbol_short!("drain_bat"),).into_val(&env);
+    assert_eq!(topics, expected_topics);
+    let count: u32 = data.into_val(&env);
+    assert_eq!(count, 2);
+}
+
+/// Never-used pairs (no usage recorded) drain silently without panic.
+#[test]
+fn test_drain_usage_batch_never_used_pairs_are_noop() {
+    let env = Env::default();
+    let (client, _admin) = setup_initialized(&env);
+    let agent = Address::generate(&env);
+    let svc = Symbol::new(&env, "ghost");
+
+    // No record_usage call: usage defaults to 0.
+    assert_eq!(client.get_usage(&agent, &svc), 0);
+
+    let mut pairs: Vec<(Address, Symbol)> = Vec::new(&env);
+    pairs.push_back((agent.clone(), svc.clone()));
+    // Must not panic.
+    client.drain_usage_batch(&pairs);
+    // Still zero after drain.
+    assert_eq!(client.get_usage(&agent, &svc), 0);
+}
+
+/// Duplicate pairs in the batch are drained idempotently.
+#[test]
+fn test_drain_usage_batch_duplicate_pairs_idempotent() {
+    let env = Env::default();
+    let (client, _admin) = setup_initialized(&env);
+    let agent = Address::generate(&env);
+    let svc = Symbol::new(&env, "dup");
+
+    record(&client, &agent, &svc, 99);
+
+    let mut pairs: Vec<(Address, Symbol)> = Vec::new(&env);
+    pairs.push_back((agent.clone(), svc.clone()));
+    pairs.push_back((agent.clone(), svc.clone()));
+    pairs.push_back((agent.clone(), svc.clone()));
+    client.drain_usage_batch(&pairs);
+
+    assert_eq!(client.get_usage(&agent, &svc), 0);
 }

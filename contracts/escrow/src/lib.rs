@@ -16,6 +16,17 @@ const CURRENT_SCHEMA: u32 = 2;
 /// Callers needing more pairs should page the requests.
 pub const MAX_BATCH_READ: u32 = 100;
 
+/// Maximum number of `(agent, service_id)` pairs accepted by a single
+/// `drain_usage_batch` call. Chosen at 50 as a conservative cap for a
+/// write-heavy loop: each pair incurs one persistent read and one persistent
+/// write, so the bound keeps the host's storage-write budget predictable and
+/// prevents runaway work during incident response. Operators needing to drain
+/// more pairs should issue multiple calls.
+///
+/// This is intentionally smaller than `MAX_BATCH_READ` because writes are
+/// more expensive than reads on the Soroban host.
+pub const MAX_BATCH_DRAIN: u32 = 50;
+
 /// Free-form metadata about a service. Stored under
 /// `DataKey::ServiceMetadata(service_id)` so dashboards and clients can
 /// resolve a service to a human-readable description and owner without
@@ -153,6 +164,8 @@ pub enum EscrowError {
     /// `record_usage` was called by/for an agent on the per-agent
     /// blocklist. Takes precedence over the allowlist.
     AgentBlocked = 17,
+    /// `drain_usage_batch` was called with more than `MAX_BATCH_DRAIN` pairs.
+    DrainBatchTooLarge = 18,
 }
 
 #[contracttype]
@@ -489,6 +502,60 @@ impl Escrow {
             results.push_back(read_usage(&env, &agent, &service_id));
         }
         results
+    }
+
+    /// Emergency admin-gated batch zeroing of many usage counters at once.
+    ///
+    /// **Maintenance / incident-response tool — not a settlement path.**
+    ///
+    /// After a metering bug that over-counted usage across a fleet, an
+    /// operator must zero many `(agent, service_id)` counters quickly without
+    /// going through the normal settlement cycle. This entrypoint does that in
+    /// a single transaction.
+    ///
+    /// # What it does
+    /// - Zeros each `DataKey::Usage(agent, service_id)` in `pairs`.
+    /// - Does **not** touch `LastSettlement` — SLA monitors will not see a
+    ///   spurious settlement timestamp for a purely administrative wipe.
+    /// - Does **not** touch `TotalUsageByAgent` or `TotalRequestsAllTime` —
+    ///   lifetime analytics are intentionally preserved so historical
+    ///   dashboards remain accurate.
+    /// - Does **not** emit a `settled` event or compute billing — no money
+    ///   moves as a result of this call.
+    /// - Emits one summary event `drain_bat(count)` where `count` is the
+    ///   number of pairs that were zeroed, for the audit trail.
+    ///
+    /// # Security
+    /// - Admin-gated: only the stored admin address may call this.
+    /// - Pause-respecting: panics with [`EscrowError::ContractPaused`] while
+    ///   the contract is paused.
+    /// - Bounded loop: panics with [`EscrowError::DrainBatchTooLarge`] when
+    ///   `pairs.len() > MAX_BATCH_DRAIN`, keeping the host's storage-write
+    ///   budget predictable. Callers must page larger operations.
+    /// - Pairs that have no usage recorded are accepted silently (zeroing an
+    ///   already-zero counter is a no-op write, idempotent and cheap).
+    pub fn drain_usage_batch(env: Env, pairs: Vec<(Address, Symbol)>) {
+        ensure_not_paused(&env);
+        let admin: Address = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Admin)
+            .unwrap_or_else(|| panic_with_error!(&env, EscrowError::NotInitialized));
+        admin.require_auth();
+        if pairs.len() > MAX_BATCH_DRAIN {
+            panic_with_error!(&env, EscrowError::DrainBatchTooLarge);
+        }
+        let count = pairs.len();
+        for (agent, service_id) in pairs.iter() {
+            env.storage()
+                .persistent()
+                .set(&DataKey::Usage(agent, service_id), &0u32);
+        }
+        // Emit a single summary audit event distinct from `settled` and any
+        // single-pair reset event. The topic is kept to 9 chars to satisfy
+        // the `symbol_short!` limit.
+        env.events()
+            .publish((symbol_short!("drain_bat"),), count);
     }
 
     /// Set the per-request price (in stroops) for a service.
