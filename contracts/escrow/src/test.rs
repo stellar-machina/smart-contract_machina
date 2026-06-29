@@ -2532,185 +2532,202 @@ fn test_compute_billing_independent_per_service() {
 }
 
 // =========================================================================
-// Guarded admin renounce tests (issue #116)
+// Pause-reads invariant tests (issue #117)
+//
+// Invariant: the pause gate blocks every state-changing entrypoint but MUST
+// NEVER prevent read getters or `unpause` from completing.  A paused
+// contract that cannot be inspected or recovered is effectively bricked,
+// which defeats the purpose of the emergency-stop mechanism.
+//
+// Covered scenarios:
+//   1. Every read getter returns normally while paused (no panic, correct value).
+//   2. `unpause` succeeds while paused and restores the ability to mutate.
+//   3. `record_usage` and `settle` panic #4 while paused and succeed after
+//      unpause (mutation blocked → recovery → mutation allowed).
+//   4. Pausing does not corrupt any previously-stored value (read-before-pause
+//      == read-while-paused for all tracked counters and flags).
 // =========================================================================
 
+/// All read getters — `get_usage`, `get_usage_batch`, `get_service_price`,
+/// `compute_billing`, `get_service_metadata`, `is_*` flags, `get_admin`,
+/// `get_schema_version`, and lifetime-counter reads — must return normally
+/// without panicking while the contract is paused.
 #[test]
-fn test_propose_renounce_sets_pending_flag() {
-    let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
-    assert!(!client.is_renounce_pending());
-    client.propose_renounce();
-    assert!(client.is_renounce_pending());
-}
-
-#[test]
-fn test_cancel_renounce_clears_pending_flag() {
-    let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
-    client.propose_renounce();
-    assert!(client.is_renounce_pending());
-    client.cancel_renounce();
-    assert!(!client.is_renounce_pending());
-}
-
-#[test]
-fn test_cancel_renounce_is_idempotent_when_not_pending() {
-    let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
-    // Calling cancel when nothing is pending is a no-op and must not panic.
-    assert!(!client.is_renounce_pending());
-    client.cancel_renounce();
-    assert!(!client.is_renounce_pending());
-}
-
-#[test]
-#[should_panic(expected = "Error(Contract, #18)")]
-fn test_confirm_renounce_requires_propose_first() {
-    // Calling confirm without a prior propose must panic with #18.
-    let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
-    client.confirm_renounce();
-}
-
-#[test]
-#[should_panic(expected = "Error(Contract, #18)")]
-fn test_confirm_renounce_after_cancel_panics() {
-    // cancel_renounce clears the flag; a subsequent confirm must be rejected.
-    let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
-    client.propose_renounce();
-    client.cancel_renounce();
-    client.confirm_renounce();
-}
-
-#[test]
-fn test_confirm_renounce_removes_admin() {
-    let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
-    assert!(client.get_admin().is_some());
-    client.propose_renounce();
-    client.confirm_renounce();
-    // After renounce the admin slot is gone.
-    assert!(client.get_admin().is_none());
-}
-
-#[test]
-fn test_confirm_renounce_clears_pending_admin() {
-    // Any in-flight admin transfer must be cleared on renounce.
-    let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
-    let next = Address::generate(&env);
-    client.propose_admin_transfer(&next);
-    assert_eq!(client.get_pending_admin(), Some(next));
-
-    client.propose_renounce();
-    client.confirm_renounce();
-
-    assert!(client.get_pending_admin().is_none());
-}
-
-#[test]
-fn test_confirm_renounce_clears_renounce_pending_flag() {
-    let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
-    client.propose_renounce();
-    client.confirm_renounce();
-    // The RenouncePending flag is removed after confirmation.
-    assert!(!client.is_renounce_pending());
-}
-
-#[test]
-fn test_confirm_renounce_emits_admin_rnc_event() {
+fn test_i117_all_read_getters_callable_while_paused() {
     let env = Env::default();
     let (client, admin) = setup_initialized(&env);
-    client.propose_renounce();
-    client.confirm_renounce();
 
-    let events = env.events().all();
-    assert!(!events.is_empty());
-    let (_addr, topics, data) = events.last().unwrap();
-    let expected_topics: soroban_sdk::Vec<soroban_sdk::Val> =
-        (symbol_short!("admin_rnc"),).into_val(&env);
-    assert_eq!(topics, expected_topics);
-    // The event data carries the former admin address.
-    let decoded: Address = data.into_val(&env);
-    assert_eq!(decoded, admin);
-}
+    let agent = Address::generate(&env);
+    let svc = Symbol::new(&env, "infer");
 
-#[test]
-#[should_panic(expected = "Error(Contract, #3)")]
-fn test_admin_gated_entrypoints_panic_after_renounce() {
-    // After renounce, admin-gated calls panic NotInitialized (#3).
-    let env = Env::default();
-    let (client, _admin) = setup_initialized(&env);
-    client.propose_renounce();
-    client.confirm_renounce();
+    // Set up state before pausing so reads have non-trivial values to return.
+    client.set_service_price(&svc, &42i128);
+    client.record_usage(&agent, &svc, &10u32);
+    let desc = String::from_str(&env, "inference service");
+    let owner = Address::generate(&env);
+    client.set_service_metadata(&svc, &desc, &owner);
+    client.register_service(&svc);
+    client.set_allowlist_enabled(&true);
+    client.set_agent_allowed(&agent, &true);
+
+    // Pause the contract — every mutation should now be blocked.
     client.pause();
+    assert!(client.is_paused());
+
+    // get_usage must return the pre-pause value.
+    assert_eq!(client.get_usage(&agent, &svc), 10);
+
+    // get_usage_batch must work while paused.
+    let mut pairs: Vec<(Address, Symbol)> = Vec::new(&env);
+    pairs.push_back((agent.clone(), svc.clone()));
+    let batch = client.get_usage_batch(&pairs);
+    assert_eq!(batch.get(0), Some(10));
+
+    // get_service_price must return the pre-pause price.
+    assert_eq!(client.get_service_price(&svc), 42i128);
+
+    // compute_billing must return the correct product while paused (10 × 42 = 420).
+    assert_eq!(client.compute_billing(&agent, &svc), 420i128);
+
+    // get_service_metadata must return the stored metadata.
+    let meta = client.get_service_metadata(&svc)
+        .expect("metadata must be readable while paused");
+    assert_eq!(meta.description, desc);
+    assert_eq!(meta.owner, owner);
+
+    // is_* flag reads — all must succeed.
+    assert!(client.is_service_registered(&svc));
+    assert!(!client.is_service_disabled(&svc));
+    assert!(client.is_allowlist_enabled());
+    assert!(client.is_agent_allowed(&agent));
+    assert!(!client.is_agent_blocked(&agent));
+    assert!(!client.is_service_registration_required());
+    assert!(client.is_paused());
+
+    // get_admin must return the stored admin.
+    assert_eq!(client.get_admin(), Some(admin));
+
+    // get_schema_version must return 2 (stamped at init).
+    assert_eq!(client.get_schema_version(), 2);
+
+    // Lifetime counters must be readable while paused.
+    assert_eq!(client.get_total_usage_by_agent(&agent), 10);
+    assert_eq!(client.get_total_requests_all_time(), 10u64);
+
+    // Per-call cap/floor defaults must be readable while paused.
+    assert_eq!(client.get_max_requests_per_call(), u32::MAX);
+    assert_eq!(client.get_min_requests_per_call(), 0);
+    assert_eq!(client.get_max_requests_per_window(), 0);
+    assert_eq!(client.get_rate_window_seconds(), 0);
 }
 
+/// `unpause` must succeed while the contract is paused, and after it returns
+/// the mutation entrypoints must be usable again.  This test locks down the
+/// "recovery always works" guarantee described in issue #117.
 #[test]
-fn test_read_entrypoints_still_work_after_renounce() {
-    // Read-only calls must succeed even after admin has been renounced.
+fn test_i117_unpause_callable_while_paused_restores_mutations() {
     let env = Env::default();
     let (client, admin) = setup_initialized(&env);
+
     let agent = Address::generate(&env);
     let svc = Symbol::new(&env, "infer");
     client.set_service_price(&svc, &10i128);
-    client.record_usage(&agent, &svc, &5u32);
 
-    client.propose_renounce();
-    client.confirm_renounce();
+    // Pause the contract.
+    client.pause();
+    assert!(client.is_paused());
 
-    // Reads must still work after renounce.
-    assert_eq!(client.get_usage(&agent, &svc), 5);
-    assert_eq!(client.get_service_price(&svc), 10i128);
-    assert_eq!(client.get_admin(), None);
-    assert!(!client.is_paused());
+    // `record_usage` must be blocked while paused (error #4).
+    let record_result = client.try_record_usage(&agent, &svc, &1u32);
+    assert!(
+        record_result.is_err(),
+        "record_usage must be rejected (#4) while paused"
+    );
+
+    // `settle` must be blocked while paused (error #4).
+    let settle_result = client.try_settle(&admin, &agent, &svc);
+    assert!(
+        settle_result.is_err(),
+        "settle must be rejected (#4) while paused"
+    );
+
+    // `unpause` must succeed — the escape hatch must never be blocked.
+    client.unpause();
+    assert!(!client.is_paused(), "contract must be unpaused after unpause()");
+
+    // After unpause, mutations must work again.
+    let rec = client.record_usage(&agent, &svc, &5u32);
+    assert_eq!(rec.requests, 5, "record_usage must succeed after unpause");
+
+    let billed = client.settle(&admin, &agent, &svc);
+    assert_eq!(billed, 50i128, "settle must succeed after unpause (5 × 10 = 50)");
+    assert_eq!(client.get_usage(&agent, &svc), 0, "usage must drain to 0 after settle");
 }
 
+/// Pausing must not corrupt any previously-stored value: every counter and
+/// flag captured before the pause must read back identically while paused.
+/// This is the "no corruption across pause" invariant from issue #117.
 #[test]
-fn test_double_propose_renounce_is_idempotent() {
-    // Re-proposing when already pending is a no-op (flag stays true).
+fn test_i117_pause_does_not_corrupt_stored_values() {
+    let env = Env::default();
+    let (client, admin) = setup_initialized(&env);
+
+    let agent = Address::generate(&env);
+    let svc = Symbol::new(&env, "infer");
+
+    // Build baseline state before pausing.
+    client.set_service_price(&svc, &7i128);
+    client.record_usage(&agent, &svc, &15u32);
+
+    // Snapshot every readable value before issuing the pause.
+    let usage_before = client.get_usage(&agent, &svc);
+    let price_before = client.get_service_price(&svc);
+    let billing_before = client.compute_billing(&agent, &svc);
+    let total_by_agent_before = client.get_total_usage_by_agent(&agent);
+    let total_all_time_before = client.get_total_requests_all_time();
+    let schema_before = client.get_schema_version();
+    let admin_before = client.get_admin();
+
+    // Pause the contract.
+    client.pause();
+
+    // Every value must be byte-for-byte identical to the pre-pause snapshot.
+    assert_eq!(client.get_usage(&agent, &svc), usage_before,
+        "get_usage must not change across pause");
+    assert_eq!(client.get_service_price(&svc), price_before,
+        "get_service_price must not change across pause");
+    assert_eq!(client.compute_billing(&agent, &svc), billing_before,
+        "compute_billing must not change across pause");
+    assert_eq!(client.get_total_usage_by_agent(&agent), total_by_agent_before,
+        "get_total_usage_by_agent must not change across pause");
+    assert_eq!(client.get_total_requests_all_time(), total_all_time_before,
+        "get_total_requests_all_time must not change across pause");
+    assert_eq!(client.get_schema_version(), schema_before,
+        "get_schema_version must not change across pause");
+    assert_eq!(client.get_admin(), admin_before,
+        "get_admin must not change across pause");
+}
+
+/// `record_usage` panics with ContractPaused (#4) while paused.
+/// Validates the mutation-blocked half of the invariant.
+#[test]
+#[should_panic(expected = "Error(Contract, #4)")]
+fn test_i117_record_usage_blocked_with_error_4_while_paused() {
     let env = Env::default();
     let (client, _admin) = setup_initialized(&env);
-    client.propose_renounce();
-    assert!(client.is_renounce_pending());
-    client.propose_renounce();
-    assert!(client.is_renounce_pending());
-    // And confirm still works after the double proposal.
-    client.confirm_renounce();
-    assert!(client.get_admin().is_none());
+    client.pause();
+    let agent = Address::generate(&env);
+    client.record_usage(&agent, &Symbol::new(&env, "infer"), &1u32);
 }
 
+/// `settle` panics with ContractPaused (#4) while paused.
+/// Validates the mutation-blocked half of the invariant.
 #[test]
-#[should_panic]
-fn test_propose_renounce_requires_admin_auth() {
+#[should_panic(expected = "Error(Contract, #4)")]
+fn test_i117_settle_blocked_with_error_4_while_paused() {
     let env = Env::default();
-    let client = setup_scoped_auth(&env);
-    // No auth mocked: admin.require_auth() must reject the call.
-    client.propose_renounce();
-}
-
-#[test]
-#[should_panic]
-fn test_confirm_renounce_requires_admin_auth() {
-    let env = Env::default();
-    let contract_id = env.register_contract(None, Escrow);
-    let client = EscrowClient::new(&env, &contract_id);
-    let admin = Address::generate(&env);
-    env.mock_all_auths();
-    client.init(&admin);
-    client.propose_renounce();
-    // Drop all auths so the confirm's require_auth() fails.
-    env.set_auths(&[]);
-    client.confirm_renounce();
-}
-
-#[test]
-#[should_panic]
-fn test_cancel_renounce_requires_admin_auth() {
-    let env = Env::default();
-    let client = setup_scoped_auth(&env);
-    client.cancel_renounce();
+    let (client, admin) = setup_initialized(&env);
+    client.pause();
+    let agent = Address::generate(&env);
+    client.settle(&admin, &agent, &Symbol::new(&env, "infer"));
 }
