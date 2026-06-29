@@ -16,6 +16,14 @@ const CURRENT_SCHEMA: u32 = 2;
 /// Callers needing more pairs should page the requests.
 pub const MAX_BATCH_READ: u32 = 100;
 
+/// Maximum number of services that `settle_all` will drain in a single call.
+/// Keeping this bounded ensures the call stays within Soroban's compute and
+/// storage-read budget. Agents with more active services must be settled
+/// service-by-service via `settle`. Chosen at 20 as a conservative cap that
+/// covers the vast majority of real agent deployments while keeping the
+/// worst-case storage-write count predictable.
+pub const MAX_SETTLE_ALL: u32 = 20;
+
 /// Free-form metadata about a service. Stored under
 /// `DataKey::ServiceMetadata(service_id)` so dashboards and clients can
 /// resolve a service to a human-readable description and owner without
@@ -102,6 +110,11 @@ pub enum DataKey {
     /// Per-agent blocklist flag. When `true`, `record_usage` rejects the
     /// agent with `AgentBlocked`, taking precedence over the allowlist.
     AgentBlocked(Address),
+    /// Index of service IDs that an agent has ever recorded usage for.
+    /// Written by `record_usage`; read by `settle_all` to iterate over
+    /// every active service for the agent in one batched settlement call.
+    /// Stored as `Vec<Symbol>` capped at `MAX_SETTLE_ALL` entries.
+    AgentServices(Address),
 }
 
 /// Typed contract errors. Codes are append-only to keep client SDKs stable.
@@ -153,6 +166,10 @@ pub enum EscrowError {
     /// `record_usage` was called by/for an agent on the per-agent
     /// blocklist. Takes precedence over the allowlist.
     AgentBlocked = 17,
+    /// `settle_all` was called for an agent whose active-service index
+    /// exceeds `MAX_SETTLE_ALL`. The caller must drain services individually
+    /// via `settle` when this bound is hit.
+    SettleAllTooLarge = 18,
 }
 
 #[contracttype]
@@ -368,6 +385,27 @@ impl Escrow {
         // saturate: settlement drains long before u32::MAX; never panic the hot path.
         let total = prev.saturating_add(requests);
         env.storage().persistent().set(&key, &total);
+
+        // Maintain the agent-service index so settle_all can iterate over
+        // every service a given agent has ever used. The index is append-only
+        // and capped at MAX_SETTLE_ALL: once the cap is reached, new service
+        // IDs are silently dropped from the index (usage still accumulates;
+        // the cap only affects batch-settlement discoverability). Duplicate
+        // service_id entries are not added: if the id is already present the
+        // index is left unchanged.
+        {
+            let svc_key = DataKey::AgentServices(agent.clone());
+            let mut svc_list: Vec<Symbol> = env
+                .storage()
+                .persistent()
+                .get(&svc_key)
+                .unwrap_or_else(|| Vec::new(&env));
+            let already_present = svc_list.iter().any(|s| s == service_id);
+            if !already_present && svc_list.len() < MAX_SETTLE_ALL {
+                svc_list.push_back(service_id.clone());
+                env.storage().persistent().set(&svc_key, &svc_list);
+            }
+        }
 
         // Cross-service lifetime counter for the agent. Saturates at u32::MAX.
         let total_key = DataKey::TotalUsageByAgent(agent.clone());
@@ -630,6 +668,100 @@ impl Escrow {
             (agent, service_id, requests, billed),
         );
         billed
+    }
+
+    /// Settle every outstanding service for an agent in a single call,
+    /// returning a `Vec<(Symbol, i128)>` of `(service_id, billed)` pairs —
+    /// one entry per service in the agent's active-service index, in
+    /// index order.
+    ///
+    /// Authorization is identical to [`Escrow::settle`]: `caller` must be
+    /// either the global admin **or** the `ServiceMetadata.owner` of **every**
+    /// service in the index. In practice, only the admin can call
+    /// `settle_all` for an agent whose services span multiple owners;
+    /// a service owner should use `settle` for their individual service.
+    ///
+    /// Bounds: panics with [`EscrowError::SettleAllTooLarge`] when the
+    /// stored index exceeds `MAX_SETTLE_ALL`. This should never occur in
+    /// normal operation because `record_usage` caps the index at the same
+    /// constant, but the guard protects against a future migration that
+    /// could write a larger index.
+    ///
+    /// Each service that has a non-zero usage counter is settled (usage
+    /// zeroed, `LastSettlement` stamped, `settled` event emitted) matching
+    /// the semantics of a direct `settle` call. Services with zero usage
+    /// are still included in the return value (with a billed amount of 0)
+    /// so callers can confirm the full sweep.
+    ///
+    /// Honours the pause gate: panics with [`EscrowError::ContractPaused`]
+    /// when paused.
+    pub fn settle_all(env: Env, caller: Address, agent: Address) -> Vec<(Symbol, i128)> {
+        if read_flag(&env, &DataKey::Paused) {
+            panic_with_error!(&env, EscrowError::ContractPaused);
+        }
+        caller.require_auth();
+        let admin: Address = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Admin)
+            .unwrap_or_else(|| panic_with_error!(&env, EscrowError::NotInitialized));
+
+        // Load the agent's active-service index.
+        let svc_list: Vec<Symbol> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::AgentServices(agent.clone()))
+            .unwrap_or_else(|| Vec::new(&env));
+
+        // Guard: the index must not exceed MAX_SETTLE_ALL.
+        if svc_list.len() > MAX_SETTLE_ALL {
+            panic_with_error!(&env, EscrowError::SettleAllTooLarge);
+        }
+
+        let now = env.ledger().timestamp();
+        let mut results: Vec<(Symbol, i128)> = Vec::new(&env);
+
+        for service_id in svc_list.iter() {
+            // Non-admin callers must own this specific service.
+            if caller != admin {
+                let meta: ServiceMetadata = env
+                    .storage()
+                    .persistent()
+                    .get(&DataKey::ServiceMetadata(service_id.clone()))
+                    .unwrap_or_else(|| {
+                        panic_with_error!(&env, EscrowError::ServiceMetadataNotFound)
+                    });
+                if caller != meta.owner {
+                    panic_with_error!(&env, EscrowError::NotPendingAdmin);
+                }
+            }
+
+            let usage_key = DataKey::Usage(agent.clone(), service_id.clone());
+            let requests: u32 = env.storage().persistent().get(&usage_key).unwrap_or(0);
+            let price: i128 = env
+                .storage()
+                .persistent()
+                .get(&DataKey::ServicePrice(service_id.clone()))
+                .unwrap_or(0);
+            // saturate: mirrors single-settle semantics.
+            let billed = (requests as i128).saturating_mul(price);
+
+            // Drain and stamp even when usage is zero (consistent with
+            // single-settle: every drain updates LastSettlement).
+            env.storage().persistent().set(&usage_key, &0u32);
+            env.storage().persistent().set(
+                &DataKey::LastSettlement(agent.clone(), service_id.clone()),
+                &now,
+            );
+            env.events().publish(
+                (symbol_short!("settled"),),
+                (agent.clone(), service_id.clone(), requests, billed),
+            );
+
+            results.push_back((service_id.clone(), billed));
+        }
+
+        results
     }
 
     /// Read the configured per-call floor, or `0` (no floor) when absent.

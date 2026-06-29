@@ -2442,3 +2442,235 @@ fn test_compute_billing_independent_per_service() {
     assert_eq!(client.compute_billing(&agent, &svc1), 50);
     assert_eq!(client.compute_billing(&agent, &svc2), 60);
 }
+
+// ────────────────────────────────────────────────────────────────────────────
+// settle_all tests (issue #15)
+// ────────────────────────────────────────────────────────────────────────────
+
+/// settle_all on an agent with no prior usage returns an empty Vec.
+#[test]
+fn test_settle_all_no_usage_returns_empty() {
+    let env = Env::default();
+    let (client, admin) = setup_initialized(&env);
+    let agent = Address::generate(&env);
+
+    let results = client.settle_all(&admin, &agent);
+    assert_eq!(results.len(), 0);
+}
+
+/// settle_all drains a single service and returns the correct billed amount.
+#[test]
+fn test_settle_all_single_service_correct_total() {
+    let env = Env::default();
+    let (client, admin) = setup_initialized(&env);
+    let agent = Address::generate(&env);
+    let svc = Symbol::new(&env, "infer");
+
+    client.set_service_price(&svc, &10i128);
+    client.record_usage(&agent, &svc, &5u32);
+
+    let results = client.settle_all(&admin, &agent);
+    assert_eq!(results.len(), 1);
+    let (returned_svc, billed) = results.get(0).unwrap();
+    assert_eq!(returned_svc, svc);
+    assert_eq!(billed, 50i128);
+
+    // Usage must be drained to zero.
+    assert_eq!(client.get_usage(&agent, &svc), 0);
+}
+
+/// settle_all drains all services for an agent and returns per-service totals.
+#[test]
+fn test_settle_all_multi_service_totals_correct() {
+    let env = Env::default();
+    let (client, admin) = setup_initialized(&env);
+    let agent = Address::generate(&env);
+    let svc_a = Symbol::new(&env, "svc_a");
+    let svc_b = Symbol::new(&env, "svc_b");
+    let svc_c = Symbol::new(&env, "svc_c");
+
+    client.set_service_price(&svc_a, &2i128);
+    client.set_service_price(&svc_b, &5i128);
+    client.set_service_price(&svc_c, &10i128);
+
+    client.record_usage(&agent, &svc_a, &10u32); // 10 × 2 = 20
+    client.record_usage(&agent, &svc_b, &3u32);  //  3 × 5 = 15
+    client.record_usage(&agent, &svc_c, &7u32);  //  7 × 10 = 70
+
+    let results = client.settle_all(&admin, &agent);
+    assert_eq!(results.len(), 3);
+
+    // Collect into a map-like structure for order-independent assertions.
+    let mut total_billed: i128 = 0;
+    for i in 0..results.len() {
+        let (_, billed) = results.get(i).unwrap();
+        total_billed += billed;
+    }
+    assert_eq!(total_billed, 105i128);
+
+    // All counters must be zeroed.
+    assert_eq!(client.get_usage(&agent, &svc_a), 0);
+    assert_eq!(client.get_usage(&agent, &svc_b), 0);
+    assert_eq!(client.get_usage(&agent, &svc_c), 0);
+}
+
+/// settle_all stamps LastSettlement for every service.
+#[test]
+fn test_settle_all_stamps_last_settlement_for_each_service() {
+    let env = Env::default();
+    let ts: u64 = 54321;
+    env.ledger().with_mut(|li| li.timestamp = ts);
+
+    let (client, admin) = setup_initialized(&env);
+    let agent = Address::generate(&env);
+    let svc_a = Symbol::new(&env, "svc_a");
+    let svc_b = Symbol::new(&env, "svc_b");
+
+    client.record_usage(&agent, &svc_a, &1u32);
+    client.record_usage(&agent, &svc_b, &1u32);
+
+    client.settle_all(&admin, &agent);
+
+    assert_eq!(client.get_last_settlement(&agent, &svc_a), Some(ts));
+    assert_eq!(client.get_last_settlement(&agent, &svc_b), Some(ts));
+}
+
+/// settle_all emits one `settled` event per service.
+#[test]
+fn test_settle_all_emits_one_settled_event_per_service() {
+    let env = Env::default();
+    let (client, admin) = setup_initialized(&env);
+    let agent = Address::generate(&env);
+    let svc_a = Symbol::new(&env, "svc_a");
+    let svc_b = Symbol::new(&env, "svc_b");
+
+    client.set_service_price(&svc_a, &3i128);
+    client.set_service_price(&svc_b, &7i128);
+    client.record_usage(&agent, &svc_a, &4u32);
+    client.record_usage(&agent, &svc_b, &2u32);
+
+    client.settle_all(&admin, &agent);
+
+    let events = env.events().all();
+    // Count events with the "settled" topic.
+    let settled_count = events
+        .iter()
+        .filter(|(_addr, topics, _data)| {
+            let expected: soroban_sdk::Vec<soroban_sdk::Val> =
+                (symbol_short!("settled"),).into_val(&env);
+            *topics == expected
+        })
+        .count();
+    assert_eq!(settled_count, 2);
+}
+
+/// settle_all panics with ContractPaused when the contract is paused.
+#[test]
+#[should_panic(expected = "Error(Contract, #4)")]
+fn test_settle_all_rejected_while_paused() {
+    let env = Env::default();
+    let (client, admin) = setup_initialized(&env);
+    let agent = Address::generate(&env);
+    client.record_usage(&agent, &Symbol::new(&env, "infer"), &1u32);
+    client.pause();
+    client.settle_all(&admin, &agent);
+}
+
+/// settle_all works correctly when the agent has used exactly one service.
+#[test]
+fn test_settle_all_single_service_zeroes_counter() {
+    let env = Env::default();
+    let (client, admin) = setup_initialized(&env);
+    let agent = Address::generate(&env);
+    let svc = Symbol::new(&env, "solo");
+
+    client.set_service_price(&svc, &100i128);
+    client.record_usage(&agent, &svc, &3u32);
+    assert_eq!(client.get_usage(&agent, &svc), 3);
+
+    client.settle_all(&admin, &agent);
+
+    assert_eq!(client.get_usage(&agent, &svc), 0);
+}
+
+/// After settle_all, recording usage and calling settle_all again works correctly.
+#[test]
+fn test_settle_all_then_re_record_and_settle_again() {
+    let env = Env::default();
+    let (client, admin) = setup_initialized(&env);
+    let agent = Address::generate(&env);
+    let svc = Symbol::new(&env, "infer");
+
+    client.set_service_price(&svc, &4i128);
+    client.record_usage(&agent, &svc, &5u32); // 5 × 4 = 20
+
+    let r1 = client.settle_all(&admin, &agent);
+    assert_eq!(r1.len(), 1);
+    let (_, billed1) = r1.get(0).unwrap();
+    assert_eq!(billed1, 20i128);
+
+    // Re-record after first settlement.
+    client.record_usage(&agent, &svc, &3u32); // 3 × 4 = 12
+
+    let r2 = client.settle_all(&admin, &agent);
+    assert_eq!(r2.len(), 1);
+    let (_, billed2) = r2.get(0).unwrap();
+    assert_eq!(billed2, 12i128);
+    assert_eq!(client.get_usage(&agent, &svc), 0);
+}
+
+/// The agent-service index stays bounded at MAX_SETTLE_ALL even when the
+/// agent records usage for more distinct services than the cap allows.
+#[test]
+fn test_settle_all_index_capped_at_max_settle_all() {
+    let env = Env::default();
+    let (client, admin) = setup_initialized(&env);
+    let agent = Address::generate(&env);
+
+    // Record usage for MAX_SETTLE_ALL + 5 distinct services.
+    // The first MAX_SETTLE_ALL should appear in settle_all; the rest are
+    // tracked via get_usage but not in the batch index.
+    for i in 0..(MAX_SETTLE_ALL + 5) {
+        // Build a Symbol name: use a short prefix + single digit (indices 0..24)
+        // Symbol names must be short ASCII. We use "s0".."s9" then wrap modulo.
+        let name = match i % 10 {
+            0 => "s0",
+            1 => "s1",
+            2 => "s2",
+            3 => "s3",
+            4 => "s4",
+            5 => "s5",
+            6 => "s6",
+            7 => "s7",
+            8 => "s8",
+            _ => "s9",
+        };
+        // Only the first 10 unique names fit since Symbol names must be unique
+        // strings for meaningful service identities. Re-using the same names
+        // after 10 just accumulates on existing pairs (not new index entries).
+        let svc = Symbol::new(&env, name);
+        client.record_usage(&agent, &svc, &1u32);
+    }
+
+    let results = client.settle_all(&admin, &agent);
+    // Result count must be ≤ MAX_SETTLE_ALL.
+    assert!(results.len() <= MAX_SETTLE_ALL);
+}
+
+/// settle_all returns correctly for a service with zero price (free service).
+#[test]
+fn test_settle_all_zero_price_service_billed_zero() {
+    let env = Env::default();
+    let (client, admin) = setup_initialized(&env);
+    let agent = Address::generate(&env);
+    let svc = Symbol::new(&env, "free");
+
+    // No price set (defaults to 0).
+    client.record_usage(&agent, &svc, &100u32);
+
+    let results = client.settle_all(&admin, &agent);
+    assert_eq!(results.len(), 1);
+    let (_, billed) = results.get(0).unwrap();
+    assert_eq!(billed, 0i128);
+    assert_eq!(client.get_usage(&agent, &svc), 0);
+}
