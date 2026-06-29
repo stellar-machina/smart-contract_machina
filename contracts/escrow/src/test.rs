@@ -201,6 +201,69 @@ fn test_get_service_price_defaults_to_zero() {
     );
 }
 
+// ── set_service_price event, guards, and round-trips ───────────────────
+//
+// `set_service_price` is admin-gated, honours the pause gate (#4),
+// rejects negative prices with `RequestsMustBePositive` (#2), accepts
+// zero as a free-service marker, emits `price_set(service_id, price)`,
+// and — when strict registration is enabled — rejects unregistered (#7)
+// and disabled (#12) services.
+
+#[test]
+fn test_set_service_price_emits_price_set_event() {
+    let env = Env::default();
+    let (client, admin) = setup_initialized(&env);
+    let svc = Symbol::new(&env, "infer");
+    let price: i128 = 500;
+
+    client.set_service_price(&svc, &price);
+
+    let events = env.events().all();
+    assert!(!events.is_empty());
+    let (_addr, topics, data) = events.last().unwrap();
+    let expected_topics: soroban_sdk::Vec<soroban_sdk::Val> =
+        (symbol_short!("price_set"),).into_val(&env);
+    assert_eq!(topics, expected_topics);
+    let decoded: (Symbol, i128) = data.into_val(&env);
+    assert_eq!(decoded, (svc, price));
+}
+
+#[test]
+fn test_set_service_price_zero_price_round_trip() {
+    let env = Env::default();
+    let (client, admin) = setup_initialized(&env);
+    let svc = Symbol::new(&env, "free");
+    client.set_service_price(&svc, &0i128);
+    assert_eq!(client.get_service_price(&svc), 0i128);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #2)")]
+fn test_set_service_price_rejects_negative_price() {
+    let env = Env::default();
+    let (client, admin) = setup_initialized(&env);
+    client.set_service_price(&Symbol::new(&env, "infer"), &(-1i128));
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #2)")]
+fn test_set_service_price_rejects_i128_min() {
+    let env = Env::default();
+    let (client, admin) = setup_initialized(&env);
+    client.set_service_price(&Symbol::new(&env, "infer"), &i128::MIN);
+}
+
+#[test]
+fn test_set_service_price_reprice_overwrites() {
+    let env = Env::default();
+    let (client, admin) = setup_initialized(&env);
+    let svc = Symbol::new(&env, "infer");
+    client.set_service_price(&svc, &100i128);
+    assert_eq!(client.get_service_price(&svc), 100i128);
+    client.set_service_price(&svc, &200i128);
+    assert_eq!(client.get_service_price(&svc), 200i128);
+}
+
 #[test]
 fn test_compute_billing_basic() {
     let env = Env::default();
