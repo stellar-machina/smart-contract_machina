@@ -2442,3 +2442,50 @@ fn test_compute_billing_independent_per_service() {
     assert_eq!(client.compute_billing(&agent, &svc1), 50);
     assert_eq!(client.compute_billing(&agent, &svc2), 60);
 }
+
+// ── Regression tests for require_admin / ensure_not_paused helpers ──────────
+//
+// These tests confirm that the shared helpers introduced in issue #29 produce
+// exactly the same error codes as the original inline code paths.  A
+// representative entrypoint is used for each helper so that any accidental
+// change to the error code (e.g. returning the wrong variant) is caught.
+
+/// `require_admin` must fire `NotInitialized (#3)` when no `init` has run.
+#[test]
+#[should_panic(expected = "Error(Contract, #3)")]
+fn test_require_admin_helper_fires_not_initialized() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, Escrow);
+    let client = EscrowClient::new(&env, &contract_id);
+    // Calling any admin-gated entrypoint before init must produce #3.
+    client.pause();
+}
+
+/// `ensure_not_paused` must fire `ContractPaused (#4)` through any admin-gated
+/// entrypoint; here we use `set_service_price` as a representative target.
+#[test]
+#[should_panic(expected = "Error(Contract, #4)")]
+fn test_ensure_not_paused_helper_fires_contract_paused() {
+    let env = Env::default();
+    let (client, _admin) = setup_initialized(&env);
+    client.pause();
+    // `set_service_price` calls `require_admin` then `ensure_not_paused`.
+    // With the contract paused, `ensure_not_paused` must fire #4.
+    client.set_service_price(&Symbol::new(&env, "infer"), &100i128);
+}
+
+/// `get_admin_address` (used by `settle`) must produce `NotInitialized (#3)`
+/// via the same error code path as the inline version it replaced.
+#[test]
+#[should_panic(expected = "Error(Contract, #3)")]
+fn test_get_admin_address_helper_fires_not_initialized_via_settle() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, Escrow);
+    let client = EscrowClient::new(&env, &contract_id);
+    // `settle` reads the admin via `get_admin_address`; without init this must be #3.
+    let caller = Address::generate(&env);
+    let agent = Address::generate(&env);
+    client.settle(&caller, &agent, &Symbol::new(&env, "infer"));
+}
