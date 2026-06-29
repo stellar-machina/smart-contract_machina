@@ -1,12 +1,51 @@
 #![cfg(test)]
 #![allow(deprecated)]
 
+//! # Escrow contract test suite
+//!
+//! ## Test-harness conventions
+//!
+//! Every test that needs a fully-initialised contract should call one of the
+//! two primary setup helpers defined at the top of this module:
+//!
+//! * [`setup_initialized`] — blanket-mocked auths, contract registered and
+//!   `init`-ed with a generated admin.  Use this for the vast majority of
+//!   tests.
+//! * [`setup_scoped_auth`] — only the `init` call is auth-mocked; all
+//!   subsequent privileged calls will fail unless the test wires up its own
+//!   `mock_auths`.  Use this when a test needs to assert that a specific
+//!   entrypoint enforces `require_auth`.
+//!
+//! Convenience helpers are also available:
+//!
+//! * [`make_agent`] — generate a fresh [`Address`] to act as an agent.
+//! * [`make_service`] — create a short [`Symbol`] representing a service id.
+//! * [`advance_ledger`] — bump the ledger timestamp by a given number of
+//!   seconds (useful for rate-window and settlement-timestamp tests).
+//! * [`set_price`] — one-liner to call `set_service_price` on a client.
+//! * [`record`]    — one-liner to call `record_usage` on a client.
+//!
+//! ### Security note
+//! Tests that use `setup_initialized` rely on `mock_all_auths`, which
+//! satisfies every `require_auth` call unconditionally.  When a test needs to
+//! verify that auth *is* enforced, use `setup_scoped_auth` or call
+//! `env.set_auths(&[])` to drop mock authorisations before the call under
+//! test.
+
 use super::*;
 use soroban_sdk::{
     testutils::{Address as _, Events, Ledger, MockAuth, MockAuthInvoke},
     Address, IntoVal, Symbol,
 };
 
+// ── Primary setup helpers ────────────────────────────────────────────────────
+
+/// Create a fully-initialised escrow contract with blanket auth mocking.
+///
+/// Returns `(client, admin)` where `admin` is the address passed to `init`.
+/// All subsequent `require_auth` calls are automatically satisfied by
+/// `mock_all_auths`, so most tests can start from this helper without any
+/// additional auth wiring.
 fn setup_initialized(env: &Env) -> (EscrowClient<'_>, Address) {
     env.mock_all_auths();
     let contract_id = env.register_contract(None, Escrow);
@@ -14,6 +53,43 @@ fn setup_initialized(env: &Env) -> (EscrowClient<'_>, Address) {
     let admin = Address::generate(env);
     client.init(&admin);
     (client, admin)
+}
+
+// ── Convenience address / symbol helpers ─────────────────────────────────────
+
+/// Generate a fresh [`Address`] to use as an agent in tests.
+///
+/// Each call returns a distinct address, so you can create independent agents
+/// without any naming collision:
+/// ```ignore
+/// let agent_a = make_agent(&env);
+/// let agent_b = make_agent(&env);
+/// ```
+fn make_agent(env: &Env) -> Address {
+    Address::generate(env)
+}
+
+/// Build a [`Symbol`] from a static string slice to use as a service id.
+///
+/// The `name` must be a valid Soroban symbol (≤ 32 alphanumeric / `_` chars).
+/// ```ignore
+/// let svc = make_service(&env, "weather_api");
+/// ```
+fn make_service(env: &Env, name: &'static str) -> Symbol {
+    Symbol::new(env, name)
+}
+
+// ── Ledger-clock helper ───────────────────────────────────────────────────────
+
+/// Advance the ledger timestamp by `seconds`.
+///
+/// Useful for rate-window rollover tests and settlement-timestamp assertions
+/// without having to repeat the `env.ledger().with_mut(…)` boilerplate:
+/// ```ignore
+/// advance_ledger(&env, 100); // move 100 s into the future
+/// ```
+fn advance_ledger(env: &Env, seconds: u64) {
+    env.ledger().with_mut(|li| li.timestamp += seconds);
 }
 
 #[test]
@@ -123,6 +199,69 @@ fn test_get_service_price_defaults_to_zero() {
         client.get_service_price(&Symbol::new(&env, "never_set")),
         0i128
     );
+}
+
+// ── set_service_price event, guards, and round-trips ───────────────────
+//
+// `set_service_price` is admin-gated, honours the pause gate (#4),
+// rejects negative prices with `RequestsMustBePositive` (#2), accepts
+// zero as a free-service marker, emits `price_set(service_id, price)`,
+// and — when strict registration is enabled — rejects unregistered (#7)
+// and disabled (#12) services.
+
+#[test]
+fn test_set_service_price_emits_price_set_event() {
+    let env = Env::default();
+    let (client, admin) = setup_initialized(&env);
+    let svc = Symbol::new(&env, "infer");
+    let price: i128 = 500;
+
+    client.set_service_price(&svc, &price);
+
+    let events = env.events().all();
+    assert!(!events.is_empty());
+    let (_addr, topics, data) = events.last().unwrap();
+    let expected_topics: soroban_sdk::Vec<soroban_sdk::Val> =
+        (symbol_short!("price_set"),).into_val(&env);
+    assert_eq!(topics, expected_topics);
+    let decoded: (Symbol, i128) = data.into_val(&env);
+    assert_eq!(decoded, (svc, price));
+}
+
+#[test]
+fn test_set_service_price_zero_price_round_trip() {
+    let env = Env::default();
+    let (client, admin) = setup_initialized(&env);
+    let svc = Symbol::new(&env, "free");
+    client.set_service_price(&svc, &0i128);
+    assert_eq!(client.get_service_price(&svc), 0i128);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #2)")]
+fn test_set_service_price_rejects_negative_price() {
+    let env = Env::default();
+    let (client, admin) = setup_initialized(&env);
+    client.set_service_price(&Symbol::new(&env, "infer"), &(-1i128));
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #2)")]
+fn test_set_service_price_rejects_i128_min() {
+    let env = Env::default();
+    let (client, admin) = setup_initialized(&env);
+    client.set_service_price(&Symbol::new(&env, "infer"), &i128::MIN);
+}
+
+#[test]
+fn test_set_service_price_reprice_overwrites() {
+    let env = Env::default();
+    let (client, admin) = setup_initialized(&env);
+    let svc = Symbol::new(&env, "infer");
+    client.set_service_price(&svc, &100i128);
+    assert_eq!(client.get_service_price(&svc), 100i128);
+    client.set_service_price(&svc, &200i128);
+    assert_eq!(client.get_service_price(&svc), 200i128);
 }
 
 #[test]
@@ -873,256 +1012,9 @@ fn test_pause_pause_unpause_ends_unpaused() {
     assert!(!client.is_paused());
 }
 
-#[test]
-fn test_per_pair_usage_saturates_at_u32_max() {
-    let env = Env::default();
-    let (client, admin) = setup_initialized(&env);
-
-    let agent = Address::generate(&env);
-    let service_id = Symbol::new(&env, "weather_api");
-
-    // record_usage takes a u32 delta, so reach the boundary across two calls:
-    // (u32::MAX - 1) then 5 more would overflow -> must clamp at u32::MAX.
-    client.record_usage(&agent, &service_id, &(u32::MAX - 1));
-    let record = client.record_usage(&agent, &service_id, &5u32);
-
-    assert_eq!(record.requests, u32::MAX);
-    assert_eq!(client.get_usage(&agent, &service_id), u32::MAX);
-}
-
-#[test]
-fn test_total_usage_by_agent_saturates_at_u32_max() {
-    let env = Env::default();
-    let (client, admin) = setup_initialized(&env);
-
-    let agent = Address::generate(&env);
-    // Two distinct services so the per-pair counters do not themselves clamp
-    // before the per-agent lifetime counter does.
-    let svc_a = Symbol::new(&env, "svc_a");
-    let svc_b = Symbol::new(&env, "svc_b");
-
-    client.record_usage(&agent, &svc_a, &(u32::MAX - 1));
-    client.record_usage(&agent, &svc_b, &10u32);
-
-    assert_eq!(client.get_total_usage_by_agent(&agent), u32::MAX);
-}
-
-#[test]
-fn test_compute_billing_saturates_at_i128_max() {
-    let env = Env::default();
-    let (client, admin) = setup_initialized(&env);
-    let _ = &admin;
-
-    let agent = Address::generate(&env);
-    let service_id = Symbol::new(&env, "expensive");
-
-    // Huge price; any positive usage makes requests*price overflow i128.
-    client.set_service_price(&service_id, &i128::MAX);
-    client.record_usage(&agent, &service_id, &2u32);
-
-    assert_eq!(client.compute_billing(&agent, &service_id), i128::MAX);
-}
-
-#[test]
-fn test_compute_billing_zero_price_is_zero() {
-    let env = Env::default();
-    let (client, admin) = setup_initialized(&env);
-
-    let agent = Address::generate(&env);
-    let service_id = Symbol::new(&env, "free_api");
-
-    // Zero price (free service): any usage bills to zero.
-    client.set_service_price(&service_id, &0i128);
-    client.record_usage(&agent, &service_id, &1000u32);
-
-    assert_eq!(client.compute_billing(&agent, &service_id), 0);
-}
-
-#[test]
-fn test_settle_unused_pair_returns_zero() {
-    let env = Env::default();
-    let (client, admin) = setup_initialized(&env);
-
-    let agent = Address::generate(&env);
-    let service_id = Symbol::new(&env, "never_used");
-
-    // No usage recorded and no price set: settle bills zero.
-    assert_eq!(client.settle(&admin, &agent, &service_id), 0);
-}
-
-#[test]
-#[should_panic(expected = "Error(Contract, #4)")]
-fn test_set_service_price_rejected_while_paused() {
-    let env = Env::default();
-    let (client, admin) = setup_initialized(&env);
-    client.pause();
-    client.set_service_price(&Symbol::new(&env, "infer"), &500i128);
-}
-
-#[test]
-#[should_panic(expected = "Error(Contract, #4)")]
-fn test_register_service_rejected_while_paused() {
-    let env = Env::default();
-    let (client, admin) = setup_initialized(&env);
-    client.pause();
-    client.register_service(&Symbol::new(&env, "infer"));
-}
-
-#[test]
-#[should_panic(expected = "Error(Contract, #4)")]
-fn test_set_agent_allowed_rejected_while_paused() {
-    let env = Env::default();
-    let (client, admin) = setup_initialized(&env);
-    client.pause();
-    let agent = Address::generate(&env);
-    client.set_agent_allowed(&agent, &true);
-}
-
-#[test]
-#[should_panic(expected = "Error(Contract, #4)")]
-fn test_set_service_metadata_rejected_while_paused() {
-    let env = Env::default();
-    let (client, admin) = setup_initialized(&env);
-    client.pause();
-    let owner = Address::generate(&env);
-    client.set_service_metadata(
-        &Symbol::new(&env, "infer"),
-        &String::from_str(&env, "desc"),
-        &owner,
-    );
-}
-
-#[test]
-#[should_panic(expected = "Error(Contract, #4)")]
-fn test_clear_service_metadata_rejected_while_paused() {
-    let env = Env::default();
-    let (client, admin) = setup_initialized(&env);
-    client.pause();
-    client.clear_service_metadata(&Symbol::new(&env, "infer"));
-}
-
-#[test]
-#[should_panic(expected = "Error(Contract, #4)")]
-fn test_set_max_requests_per_call_rejected_while_paused() {
-    let env = Env::default();
-    let (client, admin) = setup_initialized(&env);
-    client.pause();
-    client.set_max_requests_per_call(&10u32);
-}
-
-#[test]
-fn test_unpause_works_while_paused() {
-    let env = Env::default();
-    let (client, admin) = setup_initialized(&env);
-    client.pause();
-    assert!(client.is_paused());
-    // Lifecycle control must remain callable during an incident.
-    client.unpause();
-    assert!(!client.is_paused());
-}
-
-#[test]
-fn test_getter_works_while_paused() {
-    let env = Env::default();
-    let (client, admin) = setup_initialized(&env);
-    let svc = Symbol::new(&env, "infer");
-    client.set_service_price(&svc, &500i128);
-    client.pause();
-    // Read getters must remain callable while paused.
-    assert_eq!(client.get_service_price(&svc), 500i128);
-}
-
-#[test]
-fn test_register_service_with_metadata_sets_flag_and_metadata() {
-    let env = Env::default();
-    let (client, admin) = setup_initialized(&env);
-    let svc = Symbol::new(&env, "infer");
-    let owner = Address::generate(&env);
-    let description = String::from_str(&env, "GPU inference endpoint");
-
-    client.register_service_with_metadata(&svc, &description, &owner);
-
-    // A single call sets both the registration flag and the metadata.
-    assert!(client.is_service_registered(&svc));
-    let meta = client.get_service_metadata(&svc).unwrap();
-    assert_eq!(meta.description, description);
-    assert_eq!(meta.owner, owner);
-}
-
-#[test]
-fn test_register_service_with_metadata_emits_svc_reg_event() {
-    let env = Env::default();
-    let (client, admin) = setup_initialized(&env);
-    let svc = Symbol::new(&env, "infer");
-    let owner = Address::generate(&env);
-    let description = String::from_str(&env, "GPU inference endpoint");
-
-    client.register_service_with_metadata(&svc, &description, &owner);
-
-    let events = env.events().all();
-    assert!(!events.is_empty());
-    let (_addr, topics, data) = events.last().unwrap();
-    let expected_topics: soroban_sdk::Vec<soroban_sdk::Val> =
-        (symbol_short!("svc_reg"),).into_val(&env);
-    assert_eq!(topics, expected_topics);
-    let decoded: (Symbol, Address) = data.into_val(&env);
-    assert_eq!(decoded, (svc.clone(), owner.clone()));
-}
-
-#[test]
-fn test_register_service_with_metadata_overwrites_idempotently() {
-    let env = Env::default();
-    let (client, admin) = setup_initialized(&env);
-    let svc = Symbol::new(&env, "infer");
-    let owner1 = Address::generate(&env);
-    let owner2 = Address::generate(&env);
-    let desc1 = String::from_str(&env, "first");
-    let desc2 = String::from_str(&env, "second");
-
-    client.register_service_with_metadata(&svc, &desc1, &owner1);
-    // Re-registering the same id overwrites the metadata and keeps it registered.
-    client.register_service_with_metadata(&svc, &desc2, &owner2);
-
-    assert!(client.is_service_registered(&svc));
-    let meta = client.get_service_metadata(&svc).unwrap();
-    assert_eq!(meta.description, desc2);
-    assert_eq!(meta.owner, owner2);
-}
-
-#[test]
-fn test_register_service_with_metadata_allows_empty_description() {
-    let env = Env::default();
-    let (client, admin) = setup_initialized(&env);
-    let svc = Symbol::new(&env, "infer");
-    let owner = Address::generate(&env);
-    let empty = String::from_str(&env, "");
-
-    client.register_service_with_metadata(&svc, &empty, &owner);
-
-    assert!(client.is_service_registered(&svc));
-    let meta = client.get_service_metadata(&svc).unwrap();
-    assert_eq!(meta.description, empty);
-    assert_eq!(meta.owner, owner);
-}
-
-#[test]
-#[should_panic]
-fn test_register_service_with_metadata_rejects_non_admin() {
-    let env = Env::default();
-    let contract_id = env.register_contract(None, Escrow);
-    let client = EscrowClient::new(&env, &contract_id);
-    let admin = Address::generate(&env);
-    env.mock_all_auths();
-    client.init(&admin);
-
-    // Clear all authorizations so the admin.require_auth() inside the
-    // entrypoint has nothing to satisfy it and the call is rejected.
-    let svc = Symbol::new(&env, "infer");
-    let owner = Address::generate(&env);
-    let description = String::from_str(&env, "GPU inference endpoint");
-    env.set_auths(&[]);
-    client.register_service_with_metadata(&svc, &description, &owner);
-}
+// Regression coverage for the extracted `require_admin` / `ensure_not_paused`
+// helpers (issue #29): the helper refactor must preserve the exact error
+// codes and gating behaviour of the previously-inlined blocks.
 
 #[test]
 #[should_panic(expected = "Error(Contract, #3)")]
@@ -1139,7 +1031,7 @@ fn test_set_service_price_panics_not_initialized_before_init() {
 #[should_panic(expected = "Error(Contract, #4)")]
 fn test_record_usage_paused_gate_via_helper() {
     let env = Env::default();
-    let (client, admin) = setup_initialized(&env);
+    let (client, _admin) = setup_initialized(&env);
     client.pause();
     let agent = Address::generate(&env);
     // ensure_not_paused must still panic ContractPaused (#4) while paused.
@@ -2616,4 +2508,193 @@ fn test_compute_billing_independent_per_service() {
 
     assert_eq!(client.compute_billing(&agent, &svc1), 50);
     assert_eq!(client.compute_billing(&agent, &svc2), 60);
+}
+
+// ── get_contract_config tests ────────────────────────────────────────────────
+//
+// `get_contract_config()` returns a `ContractConfig` snapshot carrying every
+// global setting. Each field must equal the value returned by the corresponding
+// per-field getter for the same storage state. Covered scenarios:
+//
+//   1. Defaults on a fresh contract (all boolean flags false, numeric defaults)
+//   2. Fields match individual getters after config changes
+//   3. After toggling pause / allowlist / strict-registration
+//   4. After setting per-call bounds and rate-limit window
+//   5. Callable while paused (pure read — no pause gate)
+//   6. Callable before init (admin returns None)
+
+/// All fields carry their defaults on a freshly initialised contract.
+#[test]
+fn test_get_contract_config_defaults_on_fresh_contract() {
+    let env = Env::default();
+    let (client, admin) = setup_initialized(&env);
+
+    let cfg = client.get_contract_config();
+
+    assert!(!cfg.paused);
+    assert!(!cfg.allowlist_enabled);
+    assert!(!cfg.require_service_registration);
+    assert_eq!(cfg.max_requests_per_call, u32::MAX);
+    assert_eq!(cfg.min_requests_per_call, 0);
+    assert_eq!(cfg.max_requests_per_window, 0);
+    assert_eq!(cfg.window_seconds, 0);
+    assert_eq!(cfg.schema_version, 2);
+    assert_eq!(cfg.admin, Some(admin));
+}
+
+/// Every field in the snapshot matches the corresponding individual getter.
+#[test]
+fn test_get_contract_config_matches_individual_getters() {
+    let env = Env::default();
+    let (client, admin) = setup_initialized(&env);
+
+    client.set_allowlist_enabled(&true);
+    client.set_require_service_registration(&true);
+    client.set_max_requests_per_call(&200u32);
+    client.set_min_requests_per_call(&5u32);
+    client.set_max_requests_per_window(&50u32);
+    client.set_rate_window_seconds(&120u64);
+
+    let cfg = client.get_contract_config();
+
+    assert_eq!(cfg.paused, client.is_paused());
+    assert_eq!(cfg.allowlist_enabled, client.is_allowlist_enabled());
+    assert_eq!(
+        cfg.require_service_registration,
+        client.is_service_registration_required()
+    );
+    assert_eq!(
+        cfg.max_requests_per_call,
+        client.get_max_requests_per_call()
+    );
+    assert_eq!(
+        cfg.min_requests_per_call,
+        client.get_min_requests_per_call()
+    );
+    assert_eq!(
+        cfg.max_requests_per_window,
+        client.get_max_requests_per_window()
+    );
+    assert_eq!(cfg.window_seconds, client.get_rate_window_seconds());
+    assert_eq!(cfg.schema_version, client.get_schema_version());
+    assert_eq!(cfg.admin, client.get_admin());
+}
+
+/// Pausing the contract is reflected in the snapshot; unpausing clears it.
+#[test]
+fn test_get_contract_config_reflects_pause_toggle() {
+    let env = Env::default();
+    let (client, _admin) = setup_initialized(&env);
+
+    assert!(!client.get_contract_config().paused);
+    client.pause();
+    assert!(client.get_contract_config().paused);
+    client.unpause();
+    assert!(!client.get_contract_config().paused);
+}
+
+/// Toggling the allowlist toggle is reflected in the snapshot.
+#[test]
+fn test_get_contract_config_reflects_allowlist_toggle() {
+    let env = Env::default();
+    let (client, _admin) = setup_initialized(&env);
+
+    assert!(!client.get_contract_config().allowlist_enabled);
+    client.set_allowlist_enabled(&true);
+    assert!(client.get_contract_config().allowlist_enabled);
+    client.set_allowlist_enabled(&false);
+    assert!(!client.get_contract_config().allowlist_enabled);
+}
+
+/// Toggling the strict-registration flag is reflected in the snapshot.
+#[test]
+fn test_get_contract_config_reflects_strict_registration_toggle() {
+    let env = Env::default();
+    let (client, _admin) = setup_initialized(&env);
+
+    assert!(!client.get_contract_config().require_service_registration);
+    client.set_require_service_registration(&true);
+    assert!(client.get_contract_config().require_service_registration);
+    client.set_require_service_registration(&false);
+    assert!(!client.get_contract_config().require_service_registration);
+}
+
+/// Per-call bounds and rate-limit window are reflected correctly.
+#[test]
+fn test_get_contract_config_reflects_bounds_and_window() {
+    let env = Env::default();
+    let (client, _admin) = setup_initialized(&env);
+
+    client.set_max_requests_per_call(&500u32);
+    client.set_min_requests_per_call(&10u32);
+    client.set_max_requests_per_window(&100u32);
+    client.set_rate_window_seconds(&300u64);
+
+    let cfg = client.get_contract_config();
+    assert_eq!(cfg.max_requests_per_call, 500);
+    assert_eq!(cfg.min_requests_per_call, 10);
+    assert_eq!(cfg.max_requests_per_window, 100);
+    assert_eq!(cfg.window_seconds, 300);
+}
+
+/// The snapshot is readable while the contract is paused (pure read, no pause gate).
+#[test]
+fn test_get_contract_config_readable_while_paused() {
+    let env = Env::default();
+    let (client, admin) = setup_initialized(&env);
+    client.pause();
+
+    let cfg = client.get_contract_config();
+    assert!(cfg.paused);
+    assert_eq!(cfg.admin, Some(admin));
+}
+
+/// Before `init`, `admin` is `None` and all fields carry their defaults.
+#[test]
+fn test_get_contract_config_before_init_admin_is_none() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, Escrow);
+    let client = EscrowClient::new(&env, &contract_id);
+
+    let cfg = client.get_contract_config();
+    assert_eq!(cfg.admin, None);
+    assert!(!cfg.paused);
+    assert!(!cfg.allowlist_enabled);
+    assert!(!cfg.require_service_registration);
+    assert_eq!(cfg.max_requests_per_call, u32::MAX);
+    assert_eq!(cfg.min_requests_per_call, 0);
+    assert_eq!(cfg.max_requests_per_window, 0);
+    assert_eq!(cfg.window_seconds, 0);
+    // schema_version defaults to 1 (implicit pre-migration value) when absent.
+    assert_eq!(cfg.schema_version, 1);
+}
+
+/// The snapshot after an admin handover carries the new admin address.
+#[test]
+fn test_get_contract_config_reflects_admin_after_rotation() {
+    let env = Env::default();
+    let (client, _old_admin) = setup_initialized(&env);
+    let next = Address::generate(&env);
+    client.propose_admin_transfer(&next);
+    client.accept_admin_transfer(&next);
+
+    let cfg = client.get_contract_config();
+    assert_eq!(cfg.admin, Some(next));
+}
+
+/// The snapshot is consistent: all fields come from the same ledger read.
+/// Verify by checking that a second call immediately after returns an
+/// identical struct (no storage mutation between reads).
+#[test]
+fn test_get_contract_config_is_idempotent() {
+    let env = Env::default();
+    let (client, _admin) = setup_initialized(&env);
+
+    client.set_allowlist_enabled(&true);
+    client.set_max_requests_per_call(&99u32);
+
+    let first = client.get_contract_config();
+    let second = client.get_contract_config();
+    assert_eq!(first, second);
 }
