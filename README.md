@@ -1,6 +1,22 @@
 # AgentPay Contracts
 
+[![CI](https://github.com/Agentpay-Org/Agentpay-contracts/actions/workflows/ci.yml/badge.svg)](https://github.com/Agentpay-Org/Agentpay-contracts/actions/workflows/ci.yml)
+
 Soroban smart contracts for the AgentPay protocol: escrow, usage recording, and payment settlement on Stellar.
+
+## CI
+
+Every push and pull request runs the following gates automatically:
+
+| Step | Command |
+|------|---------|
+| Formatting | `cargo fmt --all -- --check` |
+| Linting | `cargo clippy --all-targets -- -D warnings` |
+| Build | `cargo build` |
+| Tests | `cargo test` |
+| Wasm build | `cargo build --target wasm32-unknown-unknown --release` |
+
+The Rust toolchain is pinned via `rust-toolchain.toml` (stable channel with `wasm32-unknown-unknown` target). Cargo registry and build artefacts are cached between runs to keep CI fast.
 
 ## Overview
 
