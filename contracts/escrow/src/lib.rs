@@ -35,6 +35,30 @@ pub struct ServiceMetadata {
     pub owner: Address,
 }
 
+/// A snapshot of all global contract configuration, returned by
+/// [`Escrow::get_contract_config`].
+///
+/// Each field carries the same default as its dedicated getter when the
+/// underlying storage slot is absent — for example, `max_requests_per_call`
+/// defaults to `u32::MAX` (no cap) and `schema_version` defaults to `1` (the
+/// implicit pre-migration value). The individual getters remain available and
+/// always agree with the corresponding field here; this struct is a
+/// convenience read for dashboards and health checks that would otherwise need
+/// a fan-out of nine separate calls.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ContractConfig {
+    pub paused: bool,
+    pub allowlist_enabled: bool,
+    pub require_service_registration: bool,
+    pub max_requests_per_call: u32,
+    pub min_requests_per_call: u32,
+    pub max_requests_per_window: u32,
+    pub window_seconds: u64,
+    pub schema_version: u32,
+    pub admin: Option<Address>,
+}
+
 /// Storage keys used by the escrow contract.
 ///
 /// Persistent slots survive across full TTL cycles and are appropriate for
@@ -1248,6 +1272,29 @@ impl Escrow {
             .persistent()
             .get(&DataKey::SchemaVersion)
             .unwrap_or(1)
+    }
+
+    /// Return all global contract settings in a single read.
+    ///
+    /// Pure read — no `require_auth`, no pause gate. Values are identical to
+    /// what the individual getters return for the same storage state:
+    /// `is_paused`, `is_allowlist_enabled`, `is_service_registration_required`,
+    /// `get_max_requests_per_call`, `get_min_requests_per_call`,
+    /// `get_max_requests_per_window`, `get_rate_window_seconds`,
+    /// `get_schema_version`, and `get_admin`. The per-field getters remain
+    /// available; this is a convenience snapshot only.
+    pub fn get_contract_config(env: Env) -> ContractConfig {
+        ContractConfig {
+            paused: Self::is_paused(env.clone()),
+            allowlist_enabled: Self::is_allowlist_enabled(env.clone()),
+            require_service_registration: Self::is_service_registration_required(env.clone()),
+            max_requests_per_call: Self::get_max_requests_per_call(env.clone()),
+            min_requests_per_call: Self::get_min_requests_per_call(env.clone()),
+            max_requests_per_window: Self::get_max_requests_per_window(env.clone()),
+            window_seconds: Self::get_rate_window_seconds(env.clone()),
+            schema_version: Self::get_schema_version(env.clone()),
+            admin: Self::get_admin(env),
+        }
     }
 
     /// Get the version of the contract for compatibility checks.

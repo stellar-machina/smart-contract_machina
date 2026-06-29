@@ -75,6 +75,31 @@ migration. A legacy contract deployed before this change carries the implicit v1
 default and must call `migrate_v1_to_v2()` to reach v2; calling that migration on
 a fresh v2 deploy panics with `MigrationVersionMismatch`.
 
+### Global configuration snapshot: `get_contract_config`
+
+`get_contract_config()` returns a `ContractConfig` struct containing all global
+settings in a single read. It is a pure read — no `require_auth`, no pause gate
+— and is available even before `init` (in which case `admin` is `None` and all
+other fields carry their defaults).
+
+The struct fields and their defaults when the storage slot is absent:
+
+| Field | Type | Default | Individual getter |
+|---|---|---|---|
+| `paused` | `bool` | `false` | `is_paused` |
+| `allowlist_enabled` | `bool` | `false` | `is_allowlist_enabled` |
+| `require_service_registration` | `bool` | `false` | `is_service_registration_required` |
+| `max_requests_per_call` | `u32` | `u32::MAX` (no cap) | `get_max_requests_per_call` |
+| `min_requests_per_call` | `u32` | `0` (no floor) | `get_min_requests_per_call` |
+| `max_requests_per_window` | `u32` | `0` (disabled) | `get_max_requests_per_window` |
+| `window_seconds` | `u64` | `0` (disabled) | `get_rate_window_seconds` |
+| `schema_version` | `u32` | `1` (pre-migration) | `get_schema_version` |
+| `admin` | `Option<Address>` | `None` | `get_admin` |
+
+The per-field getters remain available and always return values identical to
+the corresponding fields in this struct. `ContractConfig` is a convenience
+snapshot only and does not replace any existing getter.
+
 ## Prerequisites
 
 - [Rust](https://rustup.rs/) (stable, with `rustfmt`)
