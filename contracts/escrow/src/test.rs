@@ -650,7 +650,7 @@ fn test_settle_drains_usage_and_returns_billed() {
     let svc = Symbol::new(&env, "infer");
     client.set_service_price(&svc, &10i128);
     client.record_usage(&agent, &svc, &42u32);
-    let billed = client.settle(&admin, &agent, &svc);
+    let billed = client.settle(&agent, &svc);
     assert_eq!(billed, 420i128);
     assert_eq!(client.get_usage(&agent, &svc), 0);
 }
@@ -677,7 +677,7 @@ fn test_settle_rejected_while_paused() {
     let (client, admin) = setup_initialized(&env);
     client.pause();
     let agent = Address::generate(&env);
-    client.settle(&admin, &agent, &Symbol::new(&env, "infer"));
+    client.settle(&agent, &Symbol::new(&env, "infer"));
 }
 
 #[test]
@@ -735,7 +735,7 @@ fn test_settle_returns_zero_for_unused_pair() {
     let agent = Address::generate(&env);
     let svc = Symbol::new(&env, "infer");
     client.set_service_price(&svc, &10i128);
-    assert_eq!(client.settle(&admin, &agent, &svc), 0i128);
+    assert_eq!(client.settle(&agent, &svc), 0i128);
 }
 
 #[test]
@@ -901,7 +901,7 @@ fn test_settle_drains_to_zero_and_stamps_last_settlement() {
     // No settlement has happened yet for this pair.
     assert_eq!(client.get_last_settlement(&agent, &svc), None);
 
-    let billed = client.settle(&admin, &agent, &svc);
+    let billed = client.settle(&agent, &svc);
 
     assert_eq!(billed, 420i128);
     // Usage drains to exactly zero.
@@ -923,7 +923,7 @@ fn test_settle_billed_matches_compute_billing_for_presettle_state() {
     let expected = client.compute_billing(&agent, &svc);
     assert_eq!(expected, 91i128);
 
-    let billed = client.settle(&admin, &agent, &svc);
+    let billed = client.settle(&agent, &svc);
     assert_eq!(billed, expected);
     // And compute_billing now reads zero since usage drained.
     assert_eq!(client.compute_billing(&agent, &svc), 0i128);
@@ -938,7 +938,7 @@ fn test_settle_emits_settled_event_with_payload() {
     client.set_service_price(&svc, &10i128);
     client.record_usage(&agent, &svc, &42u32);
 
-    let billed = client.settle(&admin, &agent, &svc);
+    let billed = client.settle(&agent, &svc);
 
     let events = env.events().all();
     assert!(!events.is_empty());
@@ -1003,7 +1003,7 @@ fn test_settle_zero_usage_returns_zero_stamps_and_emits_event() {
     client.set_service_price(&svc, &10i128);
 
     // Settle a pair that never recorded any usage.
-    let billed = client.settle(&admin, &agent, &svc);
+    let billed = client.settle(&agent, &svc);
     assert_eq!(billed, 0i128);
 
     // Capture events immediately after `settle`: `events().all()` only
@@ -2047,7 +2047,7 @@ fn test_i19_lifetime_counters_survive_settle() {
     let svc = Symbol::new(&env, "infer");
     client.set_service_price(&svc, &2i128);
     client.record_usage(&agent, &svc, &9u32);
-    client.settle(&admin, &agent, &svc);
+    client.settle(&agent, &svc);
     // Per-pair usage drains, lifetime analytics persist.
     assert_eq!(client.get_usage(&agent, &svc), 0);
     assert_eq!(client.get_total_usage_by_agent(&agent), 9);
@@ -2069,7 +2069,7 @@ fn test_i19_last_settlement_none_before_some_after() {
     client.record_usage(&agent, &svc, &3u32);
     // Never-settled reads as None (distinct from Some(0)).
     assert_eq!(client.get_last_settlement(&agent, &svc), None);
-    client.settle(&admin, &agent, &svc);
+    client.settle(&agent, &svc);
     assert_eq!(client.get_last_settlement(&agent, &svc), Some(ts));
 }
 
@@ -2195,7 +2195,7 @@ fn test_i21_settle_returns_saturated_value_and_drains() {
     let svc = Symbol::new(&env, "infer");
     client.set_service_price(&svc, &i128::MAX);
     client.record_usage(&agent, &svc, &5u32);
-    let billed = client.settle(&admin, &agent, &svc);
+    let billed = client.settle(&agent, &svc);
     assert_eq!(billed, i128::MAX);
     // The counter still drains to zero even when billing saturated.
     assert_eq!(client.get_usage(&agent, &svc), 0);
@@ -2499,7 +2499,7 @@ fn test_owner_can_settle_own_service() {
     client.set_service_price(&svc, &10i128);
     client.record_usage(&agent, &svc, &5u32);
 
-    let billed = client.settle(&owner, &agent, &svc);
+    let billed = client.settle(&agent, &svc);
     assert_eq!(billed, 50i128);
     assert_eq!(client.get_usage(&agent, &svc), 0);
 }
@@ -2517,7 +2517,7 @@ fn test_admin_can_settle_owned_service() {
     client.set_service_price(&svc, &10i128);
     client.record_usage(&agent, &svc, &4u32);
 
-    let billed = client.settle(&admin, &agent, &svc);
+    let billed = client.settle(&agent, &svc);
     assert_eq!(billed, 40i128);
 }
 
@@ -2540,7 +2540,7 @@ fn test_owner_cannot_settle_other_service() {
     client.record_usage(&agent, &svc_b, &3u32);
 
     // owner_a tries to settle svc_b — unauthorized.
-    client.settle(&owner_a, &agent, &svc_b);
+    client.settle(&agent, &svc_b);
 }
 
 /// A non-admin caller settling a service with no metadata is rejected with
@@ -2556,7 +2556,7 @@ fn test_nonadmin_settle_without_metadata_rejected() {
     client.set_service_price(&svc, &10i128);
     client.record_usage(&agent, &svc, &2u32);
 
-    client.settle(&stranger, &agent, &svc);
+    client.settle(&agent, &svc);
 }
 
 /// The pause gate still applies to owner-authorized settlement.
@@ -2570,7 +2570,7 @@ fn test_owner_settle_rejected_while_paused() {
     let svc = Symbol::new(&env, "infer");
     client.set_service_metadata(&svc, &String::from_str(&env, "inference"), &owner);
     client.pause();
-    client.settle(&owner, &agent, &svc);
+    client.settle(&agent, &svc);
 }
 
 /// By default the limiter is disabled (cap 0, window 0): an agent can record
@@ -2809,7 +2809,7 @@ fn test_compute_billing_agrees_with_settle() {
     let pre_settle_bill = client.compute_billing(&agent, &svc);
 
     // settle returns the billed amount and drains the counter.
-    let settled = client.settle(&admin, &agent, &svc);
+    let settled = client.settle(&agent, &svc);
 
     assert_eq!(
         pre_settle_bill, settled,
@@ -2828,7 +2828,7 @@ fn test_compute_billing_zero_after_settle() {
 
     set_price(&client, &svc, 50);
     record(&client, &agent, &svc, 4);
-    client.settle(&admin, &agent, &svc);
+    client.settle(&agent, &svc);
 
     // Counter is drained — billing must now be 0.
     let post_settle_bill = client.compute_billing(&agent, &svc);
@@ -3060,4 +3060,171 @@ fn test_get_contract_config_is_idempotent() {
     let first = client.get_contract_config();
     let second = client.get_contract_config();
     assert_eq!(first, second);
+}
+
+// ── register_service_with_metadata ────────────────────────────────────────────
+//
+// Coverage:
+// - Atomicity: both the registration flag and the metadata slot are written
+//   by a single call, and both are immediately readable afterwards.
+// - Event: `svc_reg(service_id, owner)` is emitted.
+// - Idempotency: re-registering the same service id overwrites the metadata.
+// - Edge cases: empty `description` is accepted.
+// - Security: non-admin callers are rejected; calling while paused panics #4.
+// - Equivalence: the combined call produces the same state as the separate
+//   `register_service` + `set_service_metadata` sequence.
+
+/// After one `register_service_with_metadata` call, the service is registered
+/// **and** its metadata reflects the exact description and owner provided.
+#[test]
+fn test_register_service_with_metadata_sets_both_slots() {
+    let env = Env::default();
+    let (client, admin) = setup_initialized(&env);
+
+    let service_id = Symbol::new(&env, "weather_api");
+    let description = String::from_str(&env, "Weather data feed");
+    let owner = Address::generate(&env);
+
+    client.register_service_with_metadata(&service_id, &description, &owner);
+
+    assert!(client.is_service_registered(&service_id));
+
+    let meta = client.get_service_metadata(&service_id).unwrap();
+    assert_eq!(meta.description, description);
+    assert_eq!(meta.owner, owner);
+}
+
+/// The call emits `svc_reg(service_id, owner)` as the sole event.
+#[test]
+fn test_register_service_with_metadata_emits_svc_reg_event() {
+    let env = Env::default();
+    let (client, admin) = setup_initialized(&env);
+
+    let service_id = Symbol::new(&env, "forecast");
+    let description = String::from_str(&env, "Forecast API");
+    let owner = Address::generate(&env);
+
+    client.register_service_with_metadata(&service_id, &description, &owner);
+
+    let events = env.events().all();
+    assert!(!events.is_empty());
+    let (_addr, topics, data) = events.last().unwrap();
+
+    let expected_topics: soroban_sdk::Vec<soroban_sdk::Val> =
+        (symbol_short!("svc_reg"),).into_val(&env);
+    assert_eq!(topics, expected_topics);
+
+    let decoded: (Symbol, Address) = data.into_val(&env);
+    assert_eq!(decoded, (service_id, owner));
+}
+
+/// Re-registering an existing id overwrites its metadata (idempotent overwrite).
+#[test]
+fn test_register_service_with_metadata_idempotent_overwrite() {
+    let env = Env::default();
+    let (client, admin) = setup_initialized(&env);
+
+    let service_id = Symbol::new(&env, "forecast");
+    let desc_a = String::from_str(&env, "v1 description");
+    let owner_a = Address::generate(&env);
+
+    client.register_service_with_metadata(&service_id, &desc_a, &owner_a);
+
+    // Re-register with different metadata.
+    let desc_b = String::from_str(&env, "v2 description (overwritten)");
+    let owner_b = Address::generate(&env);
+    client.register_service_with_metadata(&service_id, &desc_b, &owner_b);
+
+    // Still registered.
+    assert!(client.is_service_registered(&service_id));
+    // Metadata reflects the latest write.
+    let meta = client.get_service_metadata(&service_id).unwrap();
+    assert_eq!(meta.description, desc_b);
+    assert_eq!(meta.owner, owner_b);
+}
+
+/// An empty description is accepted.
+#[test]
+fn test_register_service_with_metadata_empty_description() {
+    let env = Env::default();
+    let (client, admin) = setup_initialized(&env);
+
+    let service_id = Symbol::new(&env, "empty_desc");
+    let description = String::from_str(&env, "");
+    let owner = Address::generate(&env);
+
+    client.register_service_with_metadata(&service_id, &description, &owner);
+
+    assert!(client.is_service_registered(&service_id));
+    let meta = client.get_service_metadata(&service_id).unwrap();
+    assert_eq!(meta.description, description);
+}
+
+/// A non-admin caller is rejected (panics).
+#[test]
+#[should_panic]
+fn test_register_service_with_metadata_rejects_non_admin() {
+    let env = Env::default();
+    let client = setup_scoped_auth(&env);
+
+    let service_id = Symbol::new(&env, "unauthorised");
+    let description = String::from_str(&env, "sketchy service");
+    let owner = Address::generate(&env);
+
+    client.register_service_with_metadata(&service_id, &description, &owner);
+}
+
+/// Calling while paused panics with `ContractPaused` (#4).
+#[test]
+#[should_panic(expected = "Error(Contract, #4)")]
+fn test_register_service_with_metadata_panics_when_paused() {
+    let env = Env::default();
+    let (client, admin) = setup_initialized(&env);
+
+    client.pause();
+
+    let service_id = Symbol::new(&env, "paused_svc");
+    let description = String::from_str(&env, "should not land");
+    let owner = Address::generate(&env);
+
+    client.register_service_with_metadata(&service_id, &description, &owner);
+}
+
+/// The combined call is equivalent to calling `register_service` followed by
+/// `set_service_metadata` — both produce the same storage state.
+#[test]
+fn test_register_service_with_metadata_equivalent_to_separate_calls() {
+    let env = Env::default();
+    let (client, admin) = setup_initialized(&env);
+
+    let service_id = Symbol::new(&env, "equiv");
+    let description = String::from_str(&env, "equivalent service");
+    let owner = Address::generate(&env);
+
+    // Combined call.
+    client.register_service_with_metadata(&service_id, &description, &owner);
+
+    let combined_registered = client.is_service_registered(&service_id);
+    let combined_meta = client.get_service_metadata(&service_id);
+
+    // Fresh contract for separate-call path.
+    let env2 = Env::default();
+    env2.mock_all_auths();
+    let contract_id2 = env2.register_contract(None, Escrow);
+    let client2 = EscrowClient::new(&env2, &contract_id2);
+    let admin2 = Address::generate(&env2);
+    client2.init(&admin2);
+
+    let service_id2 = Symbol::new(&env2, "equiv");
+    let description2 = String::from_str(&env2, "equivalent service");
+    let owner2 = Address::generate(&env2);
+
+    client2.register_service(&service_id2);
+    client2.set_service_metadata(&service_id2, &description2, &owner2);
+
+    assert_eq!(
+        combined_registered,
+        client2.is_service_registered(&service_id2)
+    );
+    assert_eq!(combined_meta, client2.get_service_metadata(&service_id2));
 }

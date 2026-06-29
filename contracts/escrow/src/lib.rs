@@ -24,6 +24,10 @@ pub const MAX_BATCH_READ: u32 = 100;
 /// services per agent should enumerate them off-chain from event logs.
 pub const MAX_AGENT_SERVICE_INDEX: u32 = 256;
 
+/// Hard cap on the number of services `settle_all` may settle in one call.
+/// Mirrors `MAX_AGENT_SERVICE_INDEX` so the index never exceeds the settle cap.
+pub const MAX_SETTLE_ALL: u32 = 256;
+
 /// Free-form metadata about a service. Stored under
 /// `DataKey::ServiceMetadata(service_id)` so dashboards and clients can
 /// resolve a service to a human-readable description and owner without
@@ -140,6 +144,21 @@ pub enum DataKey {
     /// of the flat `ServicePrice`. Falls back to `ServicePrice` (or 0)
     /// when absent, preserving full backward compatibility.
     PriceTiers(Symbol),
+    /// Per-agent service index: a `Vec<Symbol>` of service ids for which
+    /// this agent has accumulated (or had) non-zero usage since the last
+    /// settlement. Maintained by `index_agent_service` / `deindex_agent_service`.
+    AgentServiceIndex(Address),
+    /// Alias used by `settle_all` to load the agent's service index.
+    /// Points to the same logical slot as `AgentServiceIndex`; kept as a
+    /// separate variant for API clarity.
+    AgentServices(Address),
+    /// Open-dispute flag for a `(agent, service_id)` pair. `true` while
+    /// an unresolved dispute is pending.
+    Dispute(Address, Symbol),
+    /// Usage-alert threshold for a `(agent, service_id)` pair. When the
+    /// accumulated usage crosses this value on a `record_usage` call a
+    /// `usage_hi` event is emitted (edge-triggered).
+    UsageAlertThreshold,
 }
 
 /// Typed contract errors. Codes are append-only to keep client SDKs stable.
@@ -195,6 +214,17 @@ pub enum EscrowError {
     /// either the schedule is empty, contains duplicate thresholds, or
     /// is not strictly ascending in `threshold_requests`.
     InvalidPriceTiers = 18,
+    /// `settle_all` was called but the agent's service index exceeds
+    /// `MAX_SETTLE_ALL`.
+    SettleAllTooLarge = 19,
+    /// `open_dispute` was called but a dispute is already open for the
+    /// given `(agent, service_id)` pair.
+    DisputeAlreadyOpen = 20,
+    /// `resolve_dispute` was called but no dispute is open for the pair.
+    NoOpenDispute = 21,
+    /// `resolve_dispute` was called with `refund_requests` exceeding the
+    /// current accumulated usage — prevents double-refunds.
+    RefundExceedsUsage = 22,
 }
 
 #[contracttype]
@@ -288,6 +318,101 @@ fn ensure_not_paused(env: &Env) {
     }
 }
 
+/// Read the admin address without requiring auth. Used by helpers that need
+/// the admin value for comparison but do not gate on it themselves.
+fn get_admin_address(env: &Env) -> Address {
+    env.storage()
+        .persistent()
+        .get(&DataKey::Admin)
+        .unwrap_or_else(|| panic_with_error!(env, EscrowError::NotInitialized))
+}
+
+/// Read the accumulated usage for an `(agent, service_id)` pair.
+/// Returns `0` when no usage has been recorded.
+fn read_usage(env: &Env, agent: &Address, service_id: &Symbol) -> u32 {
+    env.storage()
+        .persistent()
+        .get(&DataKey::Usage(agent.clone(), service_id.clone()))
+        .unwrap_or(0)
+}
+
+/// Add `service_id` to the per-agent service index if not already present.
+/// Capped at [`MAX_AGENT_SERVICE_INDEX`]; once full, new services are silently
+/// dropped (the per-pair counter is still written; only the index entry is
+/// skipped).
+fn index_agent_service(env: &Env, agent: &Address, service_id: &Symbol) {
+    let key = DataKey::AgentServiceIndex(agent.clone());
+    let mut index: Vec<Symbol> = env
+        .storage()
+        .persistent()
+        .get(&key)
+        .unwrap_or_else(|| Vec::new(env));
+    // Idempotent: skip if already indexed.
+    for existing in index.iter() {
+        if existing == *service_id {
+            return;
+        }
+    }
+    if index.len() >= MAX_AGENT_SERVICE_INDEX {
+        return; // cap reached; drop silently
+    }
+    index.push_back(service_id.clone());
+    env.storage().persistent().set(&key, &index);
+}
+
+/// Remove `service_id` from the per-agent service index. No-op when absent.
+fn deindex_agent_service(env: &Env, agent: &Address, service_id: &Symbol) {
+    let key = DataKey::AgentServiceIndex(agent.clone());
+    let index: Vec<Symbol> = match env.storage().persistent().get(&key) {
+        Some(v) => v,
+        None => return,
+    };
+    let mut new_index: Vec<Symbol> = Vec::new(env);
+    for existing in index.iter() {
+        if existing != *service_id {
+            new_index.push_back(existing);
+        }
+    }
+    env.storage().persistent().set(&key, &new_index);
+}
+
+/// Compute the tier-aware bill for `requests` using the provided tier schedule.
+///
+/// Iterates tiers in order (assumed strictly ascending by `threshold_requests`).
+/// Each tier covers the band from the previous tier's threshold (exclusive) to
+/// this tier's threshold (inclusive). The last tier covers all remaining
+/// requests. Saturates at `i128::MAX`.
+fn compute_billing_tiered(requests: u32, tiers: &Vec<PriceTier>) -> i128 {
+    let mut remaining = requests;
+    let mut total: i128 = 0;
+    let mut prev_threshold: u32 = 0;
+
+    for i in 0..tiers.len() {
+        let tier = tiers.get(i).unwrap();
+        let tier_capacity = tier.threshold_requests.saturating_sub(prev_threshold);
+        let in_tier = if remaining <= tier_capacity {
+            remaining
+        } else {
+            tier_capacity
+        };
+        let cost = (in_tier as i128).saturating_mul(tier.price_stroops);
+        total = total.saturating_add(cost);
+        remaining = remaining.saturating_sub(in_tier);
+        prev_threshold = tier.threshold_requests;
+        if remaining == 0 {
+            break;
+        }
+    }
+
+    // Any requests beyond all tier thresholds are billed at the last tier's price.
+    if remaining > 0 && !tiers.is_empty() {
+        let last = tiers.get(tiers.len() - 1).unwrap();
+        let overflow_cost = (remaining as i128).saturating_mul(last.price_stroops);
+        total = total.saturating_add(overflow_cost);
+    }
+
+    total
+}
 #[contract]
 pub struct Escrow;
 
@@ -948,7 +1073,7 @@ impl Escrow {
         let svc_list: Vec<Symbol> = env
             .storage()
             .persistent()
-            .get(&DataKey::AgentServices(agent.clone()))
+            .get(&DataKey::AgentServiceIndex(agent.clone()))
             .unwrap_or_else(|| Vec::new(&env));
 
         // Guard: the index must not exceed MAX_SETTLE_ALL.
@@ -1049,11 +1174,18 @@ impl Escrow {
 
     /// Admin sets the per-call lower bound on `requests` for batched
     /// writes. Pass `0` to disable the floor.
+    ///
+    /// Emits a `cfg_set` event with data `(min_call, min_requests)` after
+    /// the storage write so indexers can observe every floor change on-chain.
     pub fn set_min_requests_per_call(env: Env, min_requests: u32) {
         require_admin(&env);
         env.storage()
             .persistent()
             .set(&DataKey::MinRequestsPerCall, &min_requests);
+        env.events().publish(
+            (symbol_short!("cfg_set"),),
+            (symbol_short!("min_call"), min_requests),
+        );
     }
 
     /// Read the configured per-call cap, or `u32::MAX` (no limit) if
@@ -1078,11 +1210,18 @@ impl Escrow {
     /// active only when both this cap and the window length
     /// ([`Self::set_rate_window_seconds`]) are non-zero. Pass `0` to
     /// disable.
+    ///
+    /// Emits a `cfg_set` event with data `(max_win, max_requests)` after
+    /// the storage write so indexers can observe every cap change on-chain.
     pub fn set_max_requests_per_window(env: Env, max_requests: u32) {
         require_admin(&env);
         env.storage()
             .persistent()
             .set(&DataKey::MaxRequestsPerWindow, &max_requests);
+        env.events().publish(
+            (symbol_short!("cfg_set"),),
+            (symbol_short!("max_win"), max_requests),
+        );
     }
 
     /// Read the configured rate-limit window length in seconds, or `0`
@@ -1097,20 +1236,35 @@ impl Escrow {
     /// Admin sets the fixed rate-limit window length in seconds. The
     /// limiter is active only when both this and the per-window cap are
     /// non-zero. Pass `0` to disable.
+    ///
+    /// Emits a `cfg_set` event with data `(win_sec, window_seconds)` after
+    /// the storage write so indexers can observe every window-duration change
+    /// on-chain.
     pub fn set_rate_window_seconds(env: Env, window_seconds: u64) {
         require_admin(&env);
         env.storage()
             .persistent()
             .set(&DataKey::WindowSeconds, &window_seconds);
+        env.events().publish(
+            (symbol_short!("cfg_set"),),
+            (symbol_short!("win_sec"), window_seconds),
+        );
     }
 
     /// Admin sets the per-call upper bound on `requests` accepted by
     /// `record_usage`. Pass `u32::MAX` to effectively disable the cap.
+    ///
+    /// Emits a `cfg_set` event with data `(max_call, max_requests)` after
+    /// the storage write so indexers can observe every cap change on-chain.
     pub fn set_max_requests_per_call(env: Env, max_requests: u32) {
         require_admin(&env);
         env.storage()
             .persistent()
             .set(&DataKey::MaxRequestsPerCall, &max_requests);
+        env.events().publish(
+            (symbol_short!("cfg_set"),),
+            (symbol_short!("max_call"), max_requests),
+        );
     }
 
     /// Admin toggles strict-registration mode. When enabled,
@@ -1149,22 +1303,16 @@ impl Escrow {
         write_flag(&env, &DataKey::ServiceRegistered(service_id), true);
     }
 
-    /// Register a service and set its metadata in a single admin-gated,
-    /// pause-respecting call.
+    /// Atomically register a service AND set its metadata in one
+    /// admin-gated, pause-respecting call.
     ///
-    /// Atomically sets `ServiceRegistered(service_id) = true` and writes
-    /// `ServiceMetadata(service_id)` so that after one invocation both
-    /// `is_service_registered` and `get_service_metadata` return the new
-    /// state. Emits `svc_reg(service_id, owner)` for indexers.
+    /// Sets `ServiceRegistered(service_id) = true` and persists the
+    /// provided `ServiceMetadata`.  Emits `svc_reg(service_id, owner)`
+    /// so indexers can observe the combined registration+metadata event
+    /// in a single topic.
     ///
-    /// Idempotent overwrite: re-registering an existing id overwrites its
-    /// metadata. An empty description is accepted.
-    ///
-    /// # Security
-    /// - Admin-gated (`require_admin + require_auth`).
-    /// - Honours the pause gate (`ensure_not_paused`).
-    /// - Both slots land together — there is no window where a service is
-    ///   registered but has no metadata, or vice versa.
+    /// Idempotent — re-registering an existing id overwrites its
+    /// metadata.  An empty `description` is accepted.
     pub fn register_service_with_metadata(
         env: Env,
         service_id: Symbol,
@@ -1181,10 +1329,8 @@ impl Escrow {
                 owner: owner.clone(),
             },
         );
-        env.events().publish(
-            (symbol_short!("svc_reg"),),
-            (service_id, owner),
-        );
+        env.events()
+            .publish((symbol_short!("svc_reg"),), (service_id, owner));
     }
 
     /// Cancel a pending admin transfer. Current admin only. No-op when
@@ -1446,12 +1592,7 @@ impl Escrow {
     /// - Admin-gated: agents cannot self-resolve (`admin.require_auth()`).
     /// - No double-refund: `RefundExceedsUsage` enforces `refund <= usage`.
     /// - Dispute must be open: `NoOpenDispute` prevents spurious calls.
-    pub fn resolve_dispute(
-        env: Env,
-        agent: Address,
-        service_id: Symbol,
-        refund_requests: u32,
-    ) {
+    pub fn resolve_dispute(env: Env, agent: Address, service_id: Symbol, refund_requests: u32) {
         ensure_not_paused(&env);
         let admin: Address = env
             .storage()
@@ -1477,12 +1618,7 @@ impl Escrow {
         write_flag(&env, &dispute_key, false);
         env.events().publish(
             (symbol_short!("dispute"),),
-            (
-                symbol_short!("resolve"),
-                agent,
-                service_id,
-                refund_requests,
-            ),
+            (symbol_short!("resolve"), agent, service_id, refund_requests),
         );
     }
 }
