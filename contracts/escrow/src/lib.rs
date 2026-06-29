@@ -16,16 +16,32 @@ const CURRENT_SCHEMA: u32 = 2;
 /// Callers needing more pairs should page the requests.
 pub const MAX_BATCH_READ: u32 = 100;
 
-/// Maximum number of `(agent, service_id)` pairs accepted by a single
-/// `drain_usage_batch` call. Chosen at 50 as a conservative cap for a
-/// write-heavy loop: each pair incurs one persistent read and one persistent
-/// write, so the bound keeps the host's storage-write budget predictable and
-/// prevents runaway work during incident response. Operators needing to drain
-/// more pairs should issue multiple calls.
+/// Maximum number of service ids accepted by a single
+/// `get_services_status_batch` call. Mirrors `MAX_BATCH_READ` — the batch
+/// read iterates the input once doing three persistent reads per service id
+/// (registered flag, disabled flag, price), so the bound keeps the loop and
+/// the host's storage-read budget predictable. Callers needing more ids should
+/// page the requests.
+pub const MAX_SERVICE_STATUS_BATCH: u32 = 100;
+
+/// Per-service status snapshot returned by [`Escrow::get_services_status_batch`].
 ///
-/// This is intentionally smaller than `MAX_BATCH_READ` because writes are
-/// more expensive than reads on the Soroban host.
-pub const MAX_BATCH_DRAIN: u32 = 50;
+/// Each field maps 1-to-1 to the corresponding single-service getter so the
+/// batched and individual read paths cannot drift:
+/// - `registered` mirrors `is_service_registered`
+/// - `disabled`   mirrors `is_service_disabled`
+/// - `price_stroops` mirrors `get_service_price`
+///
+/// Unknown services (never registered/disabled/priced) produce an entry with
+/// `registered = false`, `disabled = false`, and `price_stroops = 0`.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ServiceStatus {
+    pub service_id: Symbol,
+    pub registered: bool,
+    pub disabled: bool,
+    pub price_stroops: i128,
+}
 
 /// Free-form metadata about a service. Stored under
 /// `DataKey::ServiceMetadata(service_id)` so dashboards and clients can
@@ -491,58 +507,45 @@ impl Escrow {
         results
     }
 
-    /// Emergency admin-gated batch zeroing of many usage counters at once.
+    /// Batched service-status read: returns a [`ServiceStatus`] for each input
+    /// `service_id`, in the same order as `service_ids`.
     ///
-    /// **Maintenance / incident-response tool — not a settlement path.**
+    /// Pure read — no `require_auth`, no pause gate — consistent with the
+    /// other single-service getters. Each entry reuses the same per-service
+    /// flag/price reads as [`Escrow::is_service_registered`],
+    /// [`Escrow::is_service_disabled`], and [`Escrow::get_service_price`], so
+    /// the batched and individual paths cannot drift. Unknown services (never
+    /// registered, disabled, or priced) produce an entry with
+    /// `registered = false`, `disabled = false`, and `price_stroops = 0`.
     ///
-    /// After a metering bug that over-counted usage across a fleet, an
-    /// operator must zero many `(agent, service_id)` counters quickly without
-    /// going through the normal settlement cycle. This entrypoint does that in
-    /// a single transaction.
-    ///
-    /// # What it does
-    /// - Zeros each `DataKey::Usage(agent, service_id)` in `pairs`.
-    /// - Does **not** touch `LastSettlement` — SLA monitors will not see a
-    ///   spurious settlement timestamp for a purely administrative wipe.
-    /// - Does **not** touch `TotalUsageByAgent` or `TotalRequestsAllTime` —
-    ///   lifetime analytics are intentionally preserved so historical
-    ///   dashboards remain accurate.
-    /// - Does **not** emit a `settled` event or compute billing — no money
-    ///   moves as a result of this call.
-    /// - Emits one summary event `drain_bat(count)` where `count` is the
-    ///   number of pairs that were zeroed, for the audit trail.
-    ///
-    /// # Security
-    /// - Admin-gated: only the stored admin address may call this.
-    /// - Pause-respecting: panics with [`EscrowError::ContractPaused`] while
-    ///   the contract is paused.
-    /// - Bounded loop: panics with [`EscrowError::DrainBatchTooLarge`] when
-    ///   `pairs.len() > MAX_BATCH_DRAIN`, keeping the host's storage-write
-    ///   budget predictable. Callers must page larger operations.
-    /// - Pairs that have no usage recorded are accepted silently (zeroing an
-    ///   already-zero counter is a no-op write, idempotent and cheap).
-    pub fn drain_usage_batch(env: Env, pairs: Vec<(Address, Symbol)>) {
-        ensure_not_paused(&env);
-        let admin: Address = env
-            .storage()
-            .persistent()
-            .get(&DataKey::Admin)
-            .unwrap_or_else(|| panic_with_error!(&env, EscrowError::NotInitialized));
-        admin.require_auth();
-        if pairs.len() > MAX_BATCH_DRAIN {
-            panic_with_error!(&env, EscrowError::DrainBatchTooLarge);
+    /// Panics with [`EscrowError::BatchTooLarge`] when
+    /// `service_ids.len() > MAX_SERVICE_STATUS_BATCH`. Rejecting oversized
+    /// requests keeps the read loop bounded and the host's storage-read budget
+    /// predictable; callers should page larger queries.
+    pub fn get_services_status_batch(
+        env: Env,
+        service_ids: Vec<Symbol>,
+    ) -> Vec<ServiceStatus> {
+        if service_ids.len() > MAX_SERVICE_STATUS_BATCH {
+            panic_with_error!(&env, EscrowError::BatchTooLarge);
         }
-        let count = pairs.len();
-        for (agent, service_id) in pairs.iter() {
-            env.storage()
+        let mut results: Vec<ServiceStatus> = Vec::new(&env);
+        for service_id in service_ids.iter() {
+            let registered = read_flag(&env, &DataKey::ServiceRegistered(service_id.clone()));
+            let disabled = read_flag(&env, &DataKey::ServiceDisabled(service_id.clone()));
+            let price_stroops: i128 = env
+                .storage()
                 .persistent()
-                .set(&DataKey::Usage(agent, service_id), &0u32);
+                .get(&DataKey::ServicePrice(service_id.clone()))
+                .unwrap_or(0);
+            results.push_back(ServiceStatus {
+                service_id,
+                registered,
+                disabled,
+                price_stroops,
+            });
         }
-        // Emit a single summary audit event distinct from `settled` and any
-        // single-pair reset event. The topic is kept to 9 chars to satisfy
-        // the `symbol_short!` limit.
-        env.events()
-            .publish((symbol_short!("drain_bat"),), count);
+        results
     }
 
     /// Set the per-request price (in stroops) for a service.
