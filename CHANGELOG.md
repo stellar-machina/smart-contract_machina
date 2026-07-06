@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to `Agentpay-contracts` are documented here.
+All notable changes to `smart-contract_machina` are documented here.
 
 This project uses **append-only error codes** and **additive events**:
 - Error codes (`EscrowError`) are never reassigned. New variants are added at

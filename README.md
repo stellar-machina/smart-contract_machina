@@ -1,8 +1,8 @@
-# AgentPay Contracts
+# Stellar Machina Contracts
 
-[![CI](https://github.com/Agentpay-Org/Agentpay-contracts/actions/workflows/ci.yml/badge.svg)](https://github.com/Agentpay-Org/Agentpay-contracts/actions/workflows/ci.yml)
+[![CI](https://github.com/stellar-machina/smart-contract_machina/actions/workflows/ci.yml/badge.svg)](https://github.com/stellar-machina/smart-contract_machina/actions/workflows/ci.yml)
 
-Soroban smart contracts for the AgentPay protocol: escrow, usage recording, and payment settlement on Stellar.
+Soroban smart contracts for the Stellar Machina protocol: escrow, usage recording, and payment settlement on Stellar.
 
 ## CI
 
@@ -128,7 +128,7 @@ snapshot only and does not replace any existing getter.
 1. **Clone the repo** (or add remote and pull):
 
    ```bash
-   git clone <repo-url> && cd agentpay-contracts
+   git clone <repo-url> && cd smart-contract_machina
    ```
 
 2. **Install Rust** (if needed):
@@ -148,7 +148,7 @@ snapshot only and does not replace any existing getter.
 ## Project structure
 
 ```
-agentpay-contracts/
+smart-contract_machina/
 ├── Cargo.toml              # Workspace root
 ├── contracts/
 │   └── escrow/
