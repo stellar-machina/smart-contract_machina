@@ -67,7 +67,7 @@ pub struct ContractConfig {
 ///
 /// Persistent slots survive across full TTL cycles and are appropriate for
 /// long-lived configuration (e.g. the admin address) and for per-(agent,
-/// service) usage accumulators that AgentPay's settlement loop reads.
+/// service) usage accumulators that Stellar Machina's settlement loop reads.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DataKey {

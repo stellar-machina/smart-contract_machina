@@ -1,6 +1,6 @@
 # Escrow — Entrypoint & Error-Code Reference
 
-Authoritative reference for the AgentPay escrow contract
+Authoritative reference for the Stellar Machina escrow contract
 (`contracts/escrow/src/lib.rs`). Cross-checked against the source. Error
 codes are **append-only** — never reuse or renumber a variant.
 

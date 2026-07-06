@@ -1,4 +1,4 @@
-# Contributing to AgentPay Contracts
+# Contributing to Stellar Machina Contracts
 
 Thanks for contributing! This guide documents the conventions that keep the
 `escrow` contract's on-chain interface stable for downstream client SDKs.

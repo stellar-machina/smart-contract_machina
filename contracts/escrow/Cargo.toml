@@ -2,7 +2,7 @@
 name = "escrow"
 version = "0.1.0"
 edition = "2021"
-description = "AgentPay escrow and settlement contract"
+description = "Stellar Machina escrow and settlement contract"
 
 [lib]
 crate-type = ["cdylib", "rlib"]

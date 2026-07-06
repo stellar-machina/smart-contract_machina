@@ -1,6 +1,6 @@
 # Escrow — Authorization Model
 
-This document records the authorization model for the AgentPay escrow
+This document records the authorization model for the Stellar Machina escrow
 contract (`contracts/escrow/src/lib.rs`) and the testing pattern used to
 prove it.
 
